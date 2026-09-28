@@ -22,7 +22,7 @@ from opentelemetry import trace
 from typing import Literal
 
 from pydantic import BaseModel, Field
-from sqlalchemy import DateTime, Integer, String, select
+from sqlalchemy import DateTime, Integer, String, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
@@ -181,12 +181,22 @@ def get_order(order_id: int, db: Session = Depends(get_db)):
 
 
 def _finish(db: Session, ref: str, status: str, reason: str | None = None, total: int | None = None) -> None:
-    order = _by_ref(db, ref)
-    if order is None or order.status != "PENDING":
-        return  # unknown, or already final: events can arrive late or twice
-    order.status, order.reason = status, reason
+    """Move an order from PENDING to its final state, exactly once.
+
+    A compare-and-set, not read-then-write: the UPDATE only matches while the
+    row is still PENDING, so when two callers race (overlapping lazy sweeps, a
+    sweep against a late payment event) only one changes it, and only that
+    one announces it. Reading first let both see PENDING and both publish.
+    """
+    values = {"status": status, "reason": reason}
     if total is not None:
-        order.total_cents = total
+        values["total_cents"] = total
+    changed = db.execute(
+        update(Order).where(Order.ref == ref, Order.status == "PENDING").values(**values)
+        .execution_options(synchronize_session="fetch")
+    ).rowcount
+    if changed != 1:
+        return  # unknown, or already final: events can arrive late or twice
     trace.get_current_span().set_attribute("order.status", status)
     telemetry.log(f"order {status.lower()}", order_ref=ref, reason=reason)
     bus.add(db, f"order.{status.lower()}", {"order_ref": ref, "status": status, "reason": reason})

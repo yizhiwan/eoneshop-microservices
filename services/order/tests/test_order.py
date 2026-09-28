@@ -165,3 +165,32 @@ def test_scenario_travels_in_order_created(client, published):
     assert r.status_code == 202
     assert published()[0][1]["scenario"] == "slow_payment"
     assert client.post("/orders", json={"product_id": 1, "qty": 1, "scenario": "rm -rf"}).status_code == 422
+
+
+def test_concurrent_sweeps_cancel_once(client, monkeypatch):
+    """Found live in production: the page polls GET /orders every 600 ms and
+    each GET runs the lazy sweep. Two overlapping sweeps both saw PENDING and
+    both published order.cancelled (two event ids, so dedupe couldn't help)
+    and the customer got two emails."""
+    import threading
+
+    from app import main as order_main
+
+    sent = []
+    bus.sender = lambda topic, body: sent.append(topic)
+    place(client)
+    bus.relay_once()
+    monkeypatch.setattr(order_main, "ORDER_TIMEOUT_S", -1)
+    start = threading.Barrier(4)
+
+    def sweep():
+        start.wait()
+        order_main.sweep_once()
+
+    threads = [threading.Thread(target=sweep) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    bus.relay_once()
+    assert sent.count("order.cancelled") == 1

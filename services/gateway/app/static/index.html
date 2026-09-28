@@ -247,6 +247,10 @@ async function placeOrder() {
   if (scenario === "slow_payment") addLine("payment will take longer than the order timeout…", "note");
 
   let after = 0, status = "PENDING", settledAt = 0;
+  // The feed hears events through one more Pub/Sub hop than the order status,
+  // so hold the "order COMPLETED/CANCELLED" line until its event shows up.
+  let finalLine = null, sawFinalEvent = false;
+  const flushFinal = () => { if (finalLine) { addLine(...finalLine); finalLine = null; } };
   const deadline = performance.now() + 90_000;
   while (performance.now() < deadline) {
     const [o, events] = await Promise.all([
@@ -259,12 +263,14 @@ async function placeOrder() {
       const at = serverT0 && !ev.dead_letter ? (Date.parse(ev.occurred_at) - serverT0) / 1000 : null;
       addLine(describe(ev), ev.dead_letter ? "dead" : "", at);
       animateEvent(ev);
+      if (ev.type === "order.completed" || ev.type === "order.cancelled") { sawFinalEvent = true; flushFinal(); }
     }
     if (o.status !== status) {
       status = o.status;
       if (FINAL.has(status)) {
         settledAt = performance.now();
-        addLine(`order ${status}${o.reason ? " (" + o.reason + ")" : ""}`, status === "COMPLETED" ? "" : "dead", NaN);
+        finalLine = [`order ${status}${o.reason ? " (" + o.reason + ")" : ""}`, status === "COMPLETED" ? "" : "dead", NaN];
+        if (sawFinalEvent) flushFinal();
       }
     }
     $("status").innerHTML = `Order #${order.id} <span class="badge ${status}">${status}</span>`;
@@ -273,6 +279,7 @@ async function placeOrder() {
     if (settledAt && performance.now() - settledAt > 12_000) break;
     await sleep(600);
   }
+  flushFinal();  // the feed may be down: never lose the final line
   await queue;
   $("go").disabled = false;
   loadProducts();
