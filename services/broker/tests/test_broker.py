@@ -50,7 +50,7 @@ def publish_and_wait(client, until, timeout=3.0):
 
 def test_parse_subscriptions():
     subs = main.parse_subscriptions("a=http://x:8080/p, a=http://y/p,b=http://z/p")
-    assert subs["a"] == [("a--x", "http://x:8080/p"), ("a--y", "http://y/p")]
+    assert subs["a"] == [("a--x-8080", "http://x:8080/p"), ("a--y", "http://y/p")]
     assert subs["b"] == [("b--z", "http://z/p")]
 
 

@@ -13,6 +13,7 @@ import os
 import random
 import uuid
 from collections import defaultdict, deque
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from itertools import count
 
@@ -33,7 +34,8 @@ def parse_subscriptions(spec: str) -> dict[str, list[tuple[str, str]]]:
     subs: dict[str, list[tuple[str, str]]] = defaultdict(list)
     for entry in filter(None, (e.strip() for e in spec.split(","))):
         topic, url = entry.split("=", 1)
-        subs[topic].append((f"{topic}--{httpx.URL(url).host}", url))
+        u = httpx.URL(url)
+        subs[topic].append((f"{topic}--{u.host}" + (f"-{u.port}" if u.port else ""), url))
     return subs
 
 
@@ -42,8 +44,19 @@ LOG: deque = deque(maxlen=1000)
 DEAD_LETTERS: deque = deque(maxlen=500)
 _seq = count(1)
 _tasks: set[asyncio.Task] = set()
+_http: httpx.AsyncClient | None = None
 
-app = FastAPI(title="pubsub-lite")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # One client for every delivery: creating one costs ~130 ms (CA bundle load).
+    global _http
+    _http = httpx.AsyncClient(timeout=10.0, transport=transport)
+    yield
+    await _http.aclose()
+
+
+app = FastAPI(title="pubsub-lite", lifespan=lifespan)
 
 
 def _now() -> str:
@@ -64,18 +77,17 @@ def _record(message: dict, **fields) -> None:
 
 async def deliver(sub_name: str, url: str, message: dict) -> bool:
     envelope = {"message": message, "subscription": f"projects/{PROJECT}/subscriptions/{sub_name}"}
-    async with httpx.AsyncClient(timeout=10.0, transport=transport) as c:
-        for attempt in range(1, MAX_ATTEMPTS + 1):
-            try:
-                r = await c.post(url, json=envelope)
-                ok, result = r.status_code < 300, str(r.status_code)
-            except httpx.HTTPError as e:
-                ok, result = False, type(e).__name__
-            _record(message, subscription=sub_name, attempt=attempt, result="ack" if ok else f"nack {result}")
-            if ok:
-                return True
-            if attempt < MAX_ATTEMPTS:
-                await asyncio.sleep(min(BACKOFF_S * 2 ** (attempt - 1), 10))
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            r = await _http.post(url, json=envelope)
+            ok, result = r.status_code < 300, str(r.status_code)
+        except httpx.HTTPError as e:
+            ok, result = False, type(e).__name__
+        _record(message, subscription=sub_name, attempt=attempt, result="ack" if ok else f"nack {result}")
+        if ok:
+            return True
+        if attempt < MAX_ATTEMPTS:
+            await asyncio.sleep(min(BACKOFF_S * 2 ** (attempt - 1), 10))
     DEAD_LETTERS.append({"subscription": sub_name, "message": message, "at": _now()})
     _record(message, subscription=sub_name, attempt=MAX_ATTEMPTS, result="dead-letter")
     return False

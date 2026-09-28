@@ -45,3 +45,37 @@ def test_same_order_never_charged_twice(client, published):
     client.post("/pubsub/push", json=reserved("c", 5000))
     client.post("/pubsub/push", json=reserved("c", 5000))
     assert len(published()) == 1
+
+
+def cancelled(ref):
+    return make_push("order.cancelled", {"order_ref": ref, "status": "CANCELLED", "reason": "timeout"})
+
+
+def test_cancel_after_charge_refunds(client, published):
+    client.post("/pubsub/push", json=reserved("d", 5000))
+    client.post("/pubsub/push", json=cancelled("d"))
+    client.post("/pubsub/push", json=cancelled("d"))
+    assert published() == [("payment.succeeded", {"order_ref": "d", "amount_cents": 5000}),
+                           ("payment.refunded", {"order_ref": "d", "amount_cents": 5000})]
+
+
+def test_cancel_before_charge_blocks_it(client, published):
+    client.post("/pubsub/push", json=cancelled("e"))
+    client.post("/pubsub/push", json=reserved("e", 5000))
+    assert published() == []
+
+
+def test_declined_charge_is_not_refunded(client, published):
+    client.post("/pubsub/push", json=reserved("f", 20000))
+    client.post("/pubsub/push", json=cancelled("f"))
+    assert [t for t, _ in published()] == ["payment.failed"]
+
+
+def test_decline_all_chaos(client, published):
+    from app.main import chaos
+    client.put("/chaos", json={"decline_all": True})
+    try:
+        client.post("/pubsub/push", json=reserved("g", 100))
+    finally:
+        chaos.reset()
+    assert published()[0][0] == "payment.failed"
