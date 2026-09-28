@@ -1,0 +1,56 @@
+TITLE: Learning Microservices in Public, Part 7: Watch It Live (and the Bug It Caught)
+TAGS: microservices, visualization, race-conditions, pubsub, learning-in-public
+
+This is the last part of the series. Six parts ago EoneShop was one FastAPI app on my laptop. Now it's six services on Cloud Run, talking through Google Pub/Sub, each with its own Postgres database. The goal for this part was simple: make all of that visible. You can try it at micro.eonelabs.my.
+
+Code: github.com/yizhiwan/eoneshop-microservices
+
+What you see
+
+You pick a product and click "Place order". A diagram shows the five services around Pub/Sub. Every event appears as a dot that travels from the service that published it, through Pub/Sub, to every service subscribed to it. Next to it is a timeline with the real time of each step, measured on the server.
+
+A normal order takes about two seconds end to end. Most of that is Pub/Sub delivering four events one after another, at a bit over half a second each.
+
+Where the events come from
+
+On my laptop, my homemade broker kept a log of every delivery. Google Pub/Sub doesn't give you one. So I added one more small service, the feed. It subscribes to every topic and keeps the most recent events in memory, grouped by order. The page asks it every half second: "anything new for my order?"
+
+Nothing else depends on the feed. If it crashes, orders still work and only the animation is missing. That made it safe to keep everything in memory, run exactly one copy, and give its subscriptions no dead-lettering and only ten minutes of retention.
+
+It also listens to the dead-letter topic. When Pub/Sub gives up on a message, it adds a few attributes saying which subscription failed and how many times. The feed reads those, so the page can show exactly which service failed.
+
+Breaking it on purpose, safely
+
+The most interesting part of this project is what happens when things fail. But a public page can't have a switch that breaks the shop for everyone. So each order carries its own scenario, and it only affects that order:
+
+1. Card declined: payment says no, and the saga gives the stock back.
+2. Payment too slow: payment takes longer than the order timeout. The order is cancelled while payment is still "thinking", and when payment finally wakes up, the tombstone from Part 4 stops it from charging.
+3. Catalog is down: catalog fails every delivery of this order's event. You can watch Pub/Sub retry with growing delays, give up after five attempts and move the message to the dead-letter topic at about 19 seconds. Then the order times out.
+
+Getting the slow payment right took one extra thought. My first version waited while still holding its database transaction open. On Postgres that ties up a connection for 28 seconds. On SQLite it locks the whole database, so the cancellation can't even get in. Now it commits its "I'm handling this event" record first, and only then waits.
+
+The bug the visualizer caught
+
+I tested all four scenarios in production, and the slow payment one showed "order.cancelled" twice in the timeline. I checked the notification service: two cancellation emails for the same order.
+
+Here's what happened. In Part 6 I made timeouts lazy: overdue orders are cancelled whenever someone looks at an order. The visualizer looks at the order every 600 milliseconds. Two of those requests overlapped. Both read the order, both saw PENDING, and both cancelled it.
+
+The idempotency work from Parts 3 and 5 couldn't help, because these were two different events with two different event IDs. From the consumers' point of view, the order really had been cancelled twice.
+
+The mistake was the shape of the code: read the status, check it, then write. Between the read and the write, someone else can do the same thing. The fix is a compare-and-set, one database statement that says "set this order to CANCELLED, but only if it's still PENDING". The database does the check and the write together, and tells you how many rows changed. Only the caller that actually changed the row announces it.
+
+As in Part 5, I wrote the test first: four threads sweep the same overdue order at the same moment. On the old code it failed five times out of five. On the new code it passed five out of five, on SQLite and on Postgres in CI. After the deploy, I hammered one slow order from two parallel pollers, faster than the page does: one cancellation, one email, no charge.
+
+Looking back at the whole series
+
+1. Start with a monolith. It told me where the service boundaries should be.
+2. A network call has more outcomes than a function call, and timeouts have to be designed together.
+3. Events decouple services, but only with an outbox and idempotent consumers.
+4. Every step needs an undo, and the hard cases are all about timing.
+5. Tracing proves what you think is true, and sometimes shows you it isn't.
+6. Serverless changes what your code can assume. A background thread might never run.
+7. Anything that can happen twice, will. Even your own read-then-write.
+
+The bugs I'm proudest of finding all came from actually watching the system: the localhost delay, the 130 millisecond HTTP client, the duplicate side effects, the empty Cloud Trace, and now this race. None of them showed up by reading the code, and most didn't show up in the tests until I wrote a test for the exact thing I'd seen.
+
+Thanks for following along. Go and break it: micro.eonelabs.my.
