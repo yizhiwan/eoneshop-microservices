@@ -1,20 +1,40 @@
-# Phase 2: four services, each with its own SQLite file (DB per service).
-# Only the gateway is published to the host; the rest talk on the compose network.
+# Phase 3: services talk through events via pubsub-lite (a local Pub/Sub stand-in).
+# Only the gateway is published to the host. Builds use the repo root as context
+# so every image can include the shared/ event plumbing.
+x-service: &service
+  environment: &env
+    BROKER_URL: http://broker:8080
 services:
   gateway:
-    build: services/gateway
+    build: { context: ., dockerfile: services/gateway/Dockerfile }
     ports: ["8080:8080"]
     environment:
       CATALOG_URL: http://catalog:8080
       ORDER_URL: http://order:8080
-    depends_on: [catalog, order]
-  catalog:
-    build: services/catalog
-  order:
-    build: services/order
+      NOTIFICATION_URL: http://notification:8080
+      BROKER_URL: http://broker:8080
+  broker:
+    build: { context: ., dockerfile: services/broker/Dockerfile }
     environment:
-      CATALOG_URL: http://catalog:8080
-      PAYMENT_URL: http://payment:8080
-    depends_on: [catalog, payment]
+      # Set to 1 to deliver every message twice and watch idempotency hold.
+      DUPLICATE_RATE: "0"
+      SUBSCRIPTIONS: >-
+        order.created=http://catalog:8080/pubsub/push,
+        stock.reserved=http://payment:8080/pubsub/push,
+        stock.rejected=http://order:8080/pubsub/push,
+        payment.succeeded=http://order:8080/pubsub/push,
+        payment.failed=http://order:8080/pubsub/push,
+        order.completed=http://notification:8080/pubsub/push,
+        order.cancelled=http://notification:8080/pubsub/push
+  catalog:
+    <<: *service
+    build: { context: ., dockerfile: services/catalog/Dockerfile }
+  order:
+    <<: *service
+    build: { context: ., dockerfile: services/order/Dockerfile }
   payment:
-    build: services/payment
+    <<: *service
+    build: { context: ., dockerfile: services/payment/Dockerfile }
+  notification:
+    <<: *service
+    build: { context: ., dockerfile: services/notification/Dockerfile }

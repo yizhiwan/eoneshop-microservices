@@ -1,8 +1,8 @@
-# Build from the repo root: docker build -f services/payment/Dockerfile .
+# Build from the repo root: docker build -f services/notification/Dockerfile .
 FROM python:3.12-slim
 WORKDIR /app
-COPY services/payment/requirements.txt .
+COPY services/notification/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY shared ./shared
-COPY services/payment/app ./app
+COPY services/notification/app ./app
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
