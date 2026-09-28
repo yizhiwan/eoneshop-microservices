@@ -20,7 +20,12 @@ DB_SERVICES=(catalog order payment notification)
 
 sa() { echo "shop-$1-run@$PROJECT.iam.gserviceaccount.com"; }
 PUSH_SA="shop-pubsub-push@$PROJECT.iam.gserviceaccount.com"
-ok() { "$@" 2>&1 | grep -v "already exists" || true; }
+# Run a create command; stay quiet if the thing already exists (re-runs),
+# but print everything if it failed for any other reason.
+ok() {
+  local out; out=$("$@" 2>&1) && { echo "$out"; return; }
+  grep -q "already exists" <<< "$out" || echo "$out"
+}
 
 # Which service publishes which topics (least privilege: publish only your own).
 declare -A PUBLISHES=(
