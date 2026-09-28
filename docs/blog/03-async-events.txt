@@ -1,0 +1,63 @@
+TITLE: Learning Microservices in Public, Part 3: Events, the Outbox, and Getting Every Message Twice
+TAGS: microservices, event-driven, pubsub, idempotency, learning-in-public
+
+In Part 2, order-svc called catalog and payment directly and waited for each answer. One slow service made the whole order slow, and one timeout could give the client the wrong answer. In Part 3 the services stop waiting on each other and talk through events instead.
+
+Code: github.com/yizhiwan/eoneshop-microservices
+
+The new flow
+
+Placing an order now just saves it as PENDING, announces "order.created", and answers 202 straight away. Then the services react to each other:
+
+1. catalog hears order.created, reserves the stock, and announces stock.reserved (or stock.rejected if there isn't enough).
+2. payment hears stock.reserved, charges, and announces payment.succeeded or payment.failed.
+3. order hears the result and marks the order COMPLETED or CANCELLED, then announces that.
+4. a new notification service hears that and "emails" the customer.
+
+No service knows who is listening. Order doesn't call payment any more. It doesn't even know payment exists.
+
+A small broker instead of an emulator
+
+In production this will run on Google Pub/Sub. Locally I wrote a tiny stand-in called pubsub-lite: about 120 lines that use the same API shape as Pub/Sub, so the services won't change when I switch.
+
+More importantly, I copied Pub/Sub's promises, including the uncomfortable ones. A message is delivered at least once, so sometimes more than once. A failed delivery is retried with growing delays, and after five failures it goes to a dead-letter list. There's no guarantee about order. There's also a switch that delivers every single message twice, so I could test the worst case on purpose.
+
+Problem 1: saving and announcing are two different things
+
+Say catalog reserves the stock, commits to its database, and then crashes before announcing stock.reserved. The stock is gone and nobody will ever know why. Announce first and then crash before committing, and the opposite happens.
+
+The fix is the transactional outbox. A service never publishes during a request. It writes the event into an "outbox" table in the same database transaction as the change itself. Both are saved, or neither is. A background thread then reads the outbox and publishes. If the broker is down, the events just wait in the table.
+
+The price: if the thread publishes an event and crashes before marking it sent, the event goes out again. So we're back to duplicates...
+
+Problem 2: every message might arrive twice
+
+...which is why every consumer has to be idempotent: handling the same event twice must have the same effect as handling it once. Each event carries its own event_id. Each service keeps a processed_events table and records the id in the same transaction as the work. If it's already there, the event is skipped.
+
+Payment goes one step further and keys charges by the order itself. Even if two different events ask to charge the same order, it's charged once. For money, I wanted two locks, not one.
+
+The client side gets the same treatment: POST /orders accepts an Idempotency-Key header. If a phone app times out and retries, it gets the same order back instead of a second one.
+
+The test: every message twice
+
+I turned on double delivery and placed three orders: one normal, one expensive enough to be declined, one for more stock than exists. Result: 22 deliveries, all accepted, the right final status for all three, and 3 emails, not 6.
+
+But not on the first try.
+
+Bug 1: the race I'd read about but never seen
+
+The two copies of an event can arrive at almost the same moment. Both handlers ask "have I seen this event_id?", both hear "no", and both do the work. What saved me was that processed_events has event_id as its primary key. The second commit failed with a database error, so the work was rolled back, not done twice.
+
+The lesson: the "have I seen it?" check is an optimisation. The unique constraint in the database is the actual guarantee. Now the handler treats that specific error as "duplicate, already done" instead of crashing.
+
+Bug 2: orders stuck at PENDING, with no errors anywhere
+
+Orders sat at PENDING for many seconds. No errors in any log. When I inspected the outbox, one event had been published 2.4 seconds after it was created, even though the relay runs every 0.2 seconds.
+
+The cause had nothing to do with microservices. On Windows, "localhost" is tried as IPv6 first. My services only listened on IPv4, so every connection waited about 2 seconds before falling back. Seven hops per order, about 2 seconds each: 14 seconds of nothing. Switching every local URL to 127.0.0.1 took an order from over 14 seconds to about 2.5. (I first wrote "under 1 second" here. My stopwatch was broken, and Part 4 found where the other 2 seconds were going.)
+
+That also explained Part 2. Most of the "9 seconds of retries" that broke my timeout budget was this same 2 second penalty, paid again on every attempt.
+
+What's still broken
+
+When a payment is declined, the order is cancelled but the reserved stock is never given back. In Part 2, order-svc released it with a direct call. With events there's no one in charge of "undo". Part 4 adds that back as a saga: every step gets a matching compensation step. It also adds a chaos switch, so I can break things on purpose and watch the system recover.
