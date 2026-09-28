@@ -4,7 +4,7 @@ Services export spans here with the standard OTLP exporter
 (OTEL_EXPORTER_OTLP_ENDPOINT). It keeps the last few hundred traces in memory
 and can draw one as a text waterfall, which is enough to follow one order
 across every service without running Jaeger. In Phase 6 the services export
-to Cloud Trace instead, and nothing in them changes but configuration.
+to Cloud Trace instead; that is set up once in shared/telemetry.py.
 """
 from collections import OrderedDict, defaultdict
 

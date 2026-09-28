@@ -29,7 +29,8 @@ matching `order_ref` by hand. We need to see one order as one picture.
    Docker here). It takes standard OTLP/HTTP, keeps recent traces in memory, and
    draws a text waterfall: `GET /api/traces/by-order/<ref>`, then
    `GET /api/traces/<id>/waterfall`. In Phase 6 the exporter points at Cloud
-   Trace, with no code change in the services.
+   Trace instead. That needs exporter and auth setup in `shared/telemetry.py`,
+   but no change in any service's own code.
 6. **JSON logs with `trace_id`** (`telemetry.log`), in the shape Cloud Logging
    reads (`severity`, `logging.googleapis.com/trace`), so a log line links to
    its trace.
