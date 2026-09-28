@@ -132,3 +132,29 @@ def test_lazy_sweep_cancels_when_someone_looks(client, monkeypatch):
     monkeypatch.setattr(order_main, "ORDER_TIMEOUT_S", -1)
     got = client.get(f"/orders/{o['id']}").json()
     assert got["status"] == "CANCELLED" and got["reason"] == "timeout"
+
+
+def test_flush_per_request_exports_the_server_span_before_responding():
+    """Cloud Run pauses CPU after the response, so the request's own spans,
+    including the outermost server span, must be exported before it ends."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from shared import telemetry
+
+    spans = InMemorySpanExporter()
+    # A batch that would wait a minute: only an explicit flush exports it.
+    telemetry.add_span_processor(BatchSpanProcessor(spans, schedule_delay_millis=60_000))
+    mini = FastAPI()
+
+    @mini.get("/ping")
+    def ping():
+        return {"ok": True}
+
+    FastAPIInstrumentor.instrument_app(mini)
+    telemetry.flush_per_request(mini)
+    assert TestClient(mini).get("/ping").json() == {"ok": True}
+    assert "GET /ping" in [s.name for s in spans.get_finished_spans()]
