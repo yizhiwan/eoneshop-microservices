@@ -10,7 +10,7 @@ microservices on Cloud Run. Live demo (coming): https://micro.eonelabs.my
 | 3 | Async events (Pub/Sub), idempotency, outbox | ✅ |
 | 4 | Saga + compensation, chaos toggle | ✅ |
 | 5 | Observability (OpenTelemetry, Cloud Trace) | ✅ |
-| 6 | Deploy to Cloud Run | |
+| 6 | Deploy to Cloud Run (Pub/Sub, Neon, Cloud Trace) | 🚧 code ready, [setup](docs/deploy.md) pending |
 | 7 | Live event-flow visualizer | |
 
 ## Run the monolith locally

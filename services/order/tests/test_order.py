@@ -122,3 +122,13 @@ def test_internal_tick_sweeps_and_relays(client, monkeypatch):
     monkeypatch.setattr(order_main, "ORDER_TIMEOUT_S", -1)  # everything is overdue
     assert client.post("/internal/tick").json() == {"swept": 1, "published": 2}
     assert sent == ["order.created", "order.cancelled"]
+
+
+def test_lazy_sweep_cancels_when_someone_looks(client, monkeypatch):
+    from app import main as order_main
+    monkeypatch.setattr(order_main, "LAZY_SWEEP", True)
+    o = place(client).json()
+    assert client.get(f"/orders/{o['id']}").json()["status"] == "PENDING"
+    monkeypatch.setattr(order_main, "ORDER_TIMEOUT_S", -1)
+    got = client.get(f"/orders/{o['id']}").json()
+    assert got["status"] == "CANCELLED" and got["reason"] == "timeout"
