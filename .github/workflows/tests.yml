@@ -4,8 +4,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      # Show every service's result, don't cancel the rest on the first failure.
+      fail-fast: false
       matrix:
-        dir: [monolith, services/gateway, services/broker, services/catalog, services/order, services/payment, services/notification, services/traces]
+        dir: [monolith, services/gateway, services/broker, services/catalog, services/order, services/payment, services/notification, services/traces, services/feed]
     defaults: { run: { working-directory: "${{ matrix.dir }}" } }
     steps:
       - uses: actions/checkout@v4
@@ -20,6 +22,8 @@ jobs:
   postgres:
     runs-on: ubuntu-latest
     strategy:
+      # Show every service's result, don't cancel the rest on the first failure.
+      fail-fast: false
       matrix:
         dir: [services/catalog, services/order, services/payment, services/notification]
     services:

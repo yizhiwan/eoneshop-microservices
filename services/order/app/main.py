@@ -19,6 +19,8 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from opentelemetry import trace
+from typing import Literal
+
 from pydantic import BaseModel, Field
 from sqlalchemy import DateTime, Integer, String, select
 from sqlalchemy.exc import IntegrityError
@@ -104,14 +106,22 @@ app.include_router(chaos.router)
 telemetry.setup("order", app)
 
 
+# Per-order fault injection for the public visualizer (ADR 0007). The scenario
+# travels inside this order's events, so it can only break this one order.
+Scenario = Literal["normal", "decline_payment", "slow_payment", "catalog_down"]
+
+
 class OrderIn(BaseModel):
     product_id: int
     qty: int = Field(gt=0, le=10)
+    scenario: Scenario = "normal"
 
 
 def _out(o: Order) -> dict:
     return {"id": o.id, "ref": o.ref, "product_id": o.product_id, "qty": o.qty,
-            "total_cents": o.total_cents, "status": o.status, "reason": o.reason}
+            "total_cents": o.total_cents, "status": o.status, "reason": o.reason,
+            # SQLite returns naive datetimes; they are UTC.
+            "created_at": o.created_at.replace(tzinfo=timezone.utc).isoformat() if o.created_at else None}
 
 
 def _by_ref(db: Session, ref: str) -> Order | None:
@@ -148,7 +158,8 @@ def place_order(body: OrderIn, response: Response, db: Session = Depends(get_db)
     order = Order(ref=ref, product_id=body.product_id, qty=body.qty, status="PENDING",
                   trace_ctx=json.dumps(telemetry.current_carrier()))
     db.add(order)
-    bus.add(db, "order.created", {"order_ref": ref, "product_id": body.product_id, "qty": body.qty})
+    bus.add(db, "order.created", {"order_ref": ref, "product_id": body.product_id, "qty": body.qty,
+                                  "scenario": body.scenario})
     try:
         db.commit()
     except IntegrityError:  # two concurrent requests with the same key

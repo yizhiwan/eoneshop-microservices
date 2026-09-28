@@ -79,3 +79,26 @@ def test_decline_all_chaos(client, published):
     finally:
         chaos.reset()
     assert published()[0][0] == "payment.failed"
+
+
+def reserved_with(ref, scenario):
+    return make_push("stock.reserved", {"order_ref": ref, "product_id": 1, "qty": 1,
+                                        "amount_cents": 100, "scenario": scenario})
+
+
+def test_decline_payment_scenario(client, published):
+    client.post("/pubsub/push", json=reserved_with("sp1", "decline_payment"))
+    assert published()[0][0] == "payment.failed"
+
+
+def test_slow_payment_scenario_loses_to_the_cancel(client, published, monkeypatch):
+    """The cancel arrives while payment is still 'thinking': the tombstone wins."""
+    import threading
+
+    from app import main as payment_main
+    monkeypatch.setattr(payment_main, "SLOW_PAYMENT_S", 0.5)
+    slow = threading.Thread(target=lambda: client.post("/pubsub/push", json=reserved_with("sp2", "slow_payment")))
+    slow.start()
+    client.post("/pubsub/push", json=cancelled("sp2"))
+    slow.join()
+    assert published() == []

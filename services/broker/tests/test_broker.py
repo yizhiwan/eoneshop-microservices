@@ -18,9 +18,12 @@ class Sub:
     """Fake subscriber that fails the first `failures` pushes."""
 
     def __init__(self, failures=0):
-        self.failures, self.calls = failures, []
+        self.failures, self.calls, self.raw = failures, [], []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
+        self.raw.append(request)
+        if request.url.host == "feed":
+            return httpx.Response(204)
         self.calls.append(json.loads(request.content))
         return httpx.Response(500 if len(self.calls) <= self.failures else 204)
 
@@ -46,6 +49,11 @@ def publish_and_wait(client, until, timeout=3.0):
     deadline = time.time() + timeout
     while time.time() < deadline and not until():
         time.sleep(0.02)
+
+
+def test_parse_subscriptions_with_names():
+    subs = main.parse_subscriptions("a=http://127.0.0.1:8001/p#catalog")
+    assert subs["a"] == [("a--catalog", "http://127.0.0.1:8001/p")]
 
 
 def test_parse_subscriptions():
@@ -84,3 +92,14 @@ def test_duplicate_delivery(setup):
     with TestClient(main.app) as c:
         publish_and_wait(c, lambda: len(sub.calls) >= 2)
     assert len(sub.calls) == 2
+
+
+def test_dead_letters_forwarded_with_pubsub_attributes(setup, monkeypatch):
+    sub = setup(failures=99, max_attempts=2)
+    monkeypatch.setattr(main, "DEAD_LETTER_URL", "http://feed/pubsub/push")
+    with TestClient(main.app) as c:
+        publish_and_wait(c, lambda: any(json.loads(x.content).get("subscription") == "dead-letter" for x in sub.raw))
+    dead = next(json.loads(x.content) for x in sub.raw if json.loads(x.content).get("subscription") == "dead-letter")
+    attrs = dead["message"]["attributes"]
+    assert attrs["CloudPubSubDeadLetterSourceDeliveryCount"] == "2"
+    assert attrs["CloudPubSubDeadLetterSourceSubscription"].endswith("order.created--catalog")

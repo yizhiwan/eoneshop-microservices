@@ -24,18 +24,27 @@ PROJECT = os.getenv("PUBSUB_PROJECT", "eoneshop-local")
 MAX_ATTEMPTS = int(os.getenv("MAX_ATTEMPTS", "5"))
 BACKOFF_S = float(os.getenv("BACKOFF_S", "0.5"))
 DUPLICATE_RATE = float(os.getenv("DUPLICATE_RATE", "0"))
+# Like Pub/Sub's dead-letter topic: push dead messages here, with the same
+# CloudPubSubDeadLetter* attributes Pub/Sub adds (the visualizer's feed shows them).
+DEAD_LETTER_URL = os.getenv("DEAD_LETTER_URL", "")
 
 # Tests swap this for an httpx.MockTransport.
 transport: httpx.AsyncBaseTransport | None = None
 
 
 def parse_subscriptions(spec: str) -> dict[str, list[tuple[str, str]]]:
-    """'topic=url,topic=url' -> {topic: [(subscription_name, url)]}"""
+    """'topic=url[#name],...' -> {topic: [(subscription_name, url)]}
+
+    The subscription is named '<topic>--<name>' like in production; without
+    '#name' the name comes from the URL's host (and port)."""
     subs: dict[str, list[tuple[str, str]]] = defaultdict(list)
     for entry in filter(None, (e.strip() for e in spec.split(","))):
-        topic, url = entry.split("=", 1)
-        u = httpx.URL(url)
-        subs[topic].append((f"{topic}--{u.host}" + (f"-{u.port}" if u.port else ""), url))
+        topic, target = entry.split("=", 1)
+        url, _, name = target.partition("#")
+        if not name:
+            u = httpx.URL(url)
+            name = u.host + (f"-{u.port}" if u.port else "")
+        subs[topic].append((f"{topic}--{name}", url))
     return subs
 
 
@@ -90,6 +99,16 @@ async def deliver(sub_name: str, url: str, message: dict) -> bool:
             await asyncio.sleep(min(BACKOFF_S * 2 ** (attempt - 1), 10))
     DEAD_LETTERS.append({"subscription": sub_name, "message": message, "at": _now()})
     _record(message, subscription=sub_name, attempt=MAX_ATTEMPTS, result="dead-letter")
+    if DEAD_LETTER_URL:
+        dead = {**message, "attributes": {
+            **message["attributes"],
+            "CloudPubSubDeadLetterSourceDeliveryCount": str(MAX_ATTEMPTS),
+            "CloudPubSubDeadLetterSourceSubscription": f"projects/{PROJECT}/subscriptions/{sub_name}",
+        }}
+        try:
+            await _http.post(DEAD_LETTER_URL, json={"message": dead, "subscription": "dead-letter"})
+        except httpx.HTTPError:
+            pass  # best effort, like a DLQ nobody subscribed to
     return False
 
 

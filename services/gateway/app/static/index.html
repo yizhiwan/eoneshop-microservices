@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EoneShop · Watch an order travel</title>
+<meta name="description" content="Place an order and watch it travel through five microservices on Cloud Run, Pub/Sub and Neon. Break it on purpose and watch the saga clean up.">
+<style>
+  :root {
+    --bg: #f7f7f5; --panel: #ffffff; --ink: #1c1c1a; --muted: #6b6b66; --line: #e3e2dd;
+    --accent: #2f6fed; --ok: #1f9d55; --bad: #d64545; --warn: #c7811a; --hub: #8a5cf6;
+    --node: #ffffff; --node-line: #cfcdc6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111210; --panel: #1a1b19; --ink: #ecebe6; --muted: #9a9993; --line: #2c2d2a;
+      --accent: #6b9bff; --ok: #3fbf7a; --bad: #f06a6a; --warn: #e5a13a; --hub: #a98bff;
+      --node: #20211f; --node-line: #3a3b38; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header, main, footer { max-width: 1100px; margin: 0 auto; padding: 0 16px; }
+  header { padding-top: 28px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .sub a, footer a { color: var(--accent); }
+  main { display: grid; grid-template-columns: 300px 1fr; gap: 16px; }
+  @media (max-width: 820px) { main { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  label.field { display: block; font-size: .85rem; color: var(--muted); margin: 0 0 4px; }
+  select, input[type=number] { width: 100%; padding: 8px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--ink); font: inherit; margin-bottom: 12px; }
+  fieldset { border: 0; padding: 0; margin: 0 0 12px; }
+  legend { font-size: .85rem; color: var(--muted); margin-bottom: 6px; }
+  .scenario { display: flex; gap: 8px; padding: 8px; border: 1px solid var(--line); border-radius: 8px;
+    margin-bottom: 6px; cursor: pointer; }
+  .scenario:has(input:checked) { border-color: var(--accent); }
+  .scenario small { display: block; color: var(--muted); font-size: .8rem; }
+  button { width: 100%; padding: 10px; border: 0; border-radius: 8px; background: var(--accent); color: #fff;
+    font: 600 1rem system-ui, sans-serif; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: progress; }
+  .status { margin-top: 12px; font-size: .9rem; min-height: 1.5em; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: .8rem; font-weight: 600;
+    border: 1px solid currentColor; }
+  .PENDING { color: var(--warn); } .COMPLETED { color: var(--ok); } .CANCELLED { color: var(--bad); }
+  svg { width: 100%; height: auto; display: block; }
+  .node rect { fill: var(--node); stroke: var(--node-line); stroke-width: 1.5; }
+  .node text { fill: var(--ink); font: 600 13px system-ui, sans-serif; text-anchor: middle; }
+  .node .role { fill: var(--muted); font: 11px system-ui, sans-serif; }
+  .node.hit rect { stroke: var(--accent); stroke-width: 2.5; }
+  .node.down rect { stroke: var(--bad); stroke-width: 2.5; }
+  .wire { stroke: var(--line); stroke-width: 2; }
+  .hub circle { fill: none; stroke: var(--hub); stroke-width: 2; stroke-dasharray: 4 4; }
+  .hub text { fill: var(--hub); font: 600 12px system-ui, sans-serif; text-anchor: middle; }
+  .dot { fill: var(--accent); }
+  .dot.bad { fill: var(--bad); }
+  .dotlabel { fill: var(--ink); font: 11px ui-monospace, monospace; text-anchor: middle; paint-order: stroke;
+    stroke: var(--panel); stroke-width: 3px; }
+  ol#timeline { list-style: none; margin: 12px 0 0; padding: 0; font: 13px/1.45 ui-monospace, "Cascadia Mono", monospace; }
+  ol#timeline li { padding: 6px 0; border-top: 1px solid var(--line); display: grid;
+    grid-template-columns: 64px 1fr; gap: 8px; }
+  ol#timeline .t { color: var(--muted); text-align: right; }
+  ol#timeline .dead { color: var(--bad); }
+  ol#timeline .note { color: var(--muted); }
+  .hint { color: var(--muted); font-size: .85rem; margin: 8px 0 0; }
+  footer { color: var(--muted); font-size: .85rem; padding-top: 20px; padding-bottom: 32px; }
+  @media (prefers-reduced-motion: reduce) { .dot, .dotlabel { display: none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Watch an order travel through five microservices</h1>
+  <p class="sub">EoneShop runs on Cloud Run, Google Pub/Sub and Neon Postgres. Place an order, or break one on
+    purpose, and watch the events and the saga clean-up happen live.
+    <a href="https://github.com/yizhiwan/eoneshop-microservices" target="_blank" rel="noopener">Code &amp; design notes</a>
+    · <a href="https://eonelabs.my/blog" target="_blank" rel="noopener">Blog series</a></p>
+</header>
+
+<main>
+  <section class="panel" aria-label="Place an order">
+    <label class="field" for="product">Product</label>
+    <select id="product"><option>Loading…</option></select>
+    <label class="field" for="qty">Quantity</label>
+    <input id="qty" type="number" min="1" max="10" value="1">
+    <fieldset>
+      <legend>What should happen?</legend>
+      <label class="scenario"><input type="radio" name="scenario" value="normal" checked>
+        <span>Normal order<small>Stock reserved, card charged, email sent.</small></span></label>
+      <label class="scenario"><input type="radio" name="scenario" value="decline_payment">
+        <span>Card declined<small>Payment fails, the saga gives the stock back.</small></span></label>
+      <label class="scenario"><input type="radio" name="scenario" value="slow_payment">
+        <span>Payment too slow<small>The order times out first; the late charge is blocked.</small></span></label>
+      <label class="scenario"><input type="radio" name="scenario" value="catalog_down">
+        <span>Catalog is down<small>Pub/Sub retries, then dead-letters; the order times out.</small></span></label>
+    </fieldset>
+    <button id="go">Place order</button>
+    <div class="status" id="status" role="status" aria-live="polite"></div>
+    <p class="hint">Scenarios only affect your own order. First order after a quiet spell is slower: the services
+      and databases are waking up from zero.</p>
+  </section>
+
+  <section class="panel" id="live" aria-label="Live view">
+    <svg viewBox="0 0 640 330" role="img" aria-label="Diagram of the five services around Pub/Sub">
+      <g id="wires"></g>
+      <g class="hub"><circle cx="360" cy="165" r="46"></circle><text x="360" y="162">Pub/Sub</text>
+        <text x="360" y="178" style="font-weight:400;font-size:11px">topics</text></g>
+      <g id="nodes"></g>
+      <g id="dots"></g>
+    </svg>
+    <ol id="timeline" aria-label="Event timeline"></ol>
+  </section>
+</main>
+
+<footer>Each dot is a real event published by one service and delivered by Pub/Sub to the services subscribed to it.
+  The timeline comes from a read-only tap on every topic. Built by Ikhwan, part of
+  <a href="https://eonelabs.my">eonelabs.my</a>.</footer>
+
+<script>
+const API = "/api";
+const NODES = {
+  gateway:      { x: 70,  y: 165, role: "public entry" },
+  order:        { x: 200, y: 60,  role: "owns orders" },
+  catalog:      { x: 540, y: 60,  role: "stock" },
+  payment:      { x: 540, y: 270, role: "fake card" },
+  notification: { x: 200, y: 270, role: "emails" },
+};
+const HUB = { x: 360, y: 165 };
+const FINAL = new Set(["COMPLETED", "CANCELLED"]);
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const svgNS = "http://www.w3.org/2000/svg";
+const $ = (id) => document.getElementById(id);
+
+function el(tag, attrs, parent, text) {
+  const e = document.createElementNS(svgNS, tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  if (text) e.textContent = text;
+  parent.appendChild(e);
+  return e;
+}
+
+function drawDiagram() {
+  const wires = $("wires"), nodes = $("nodes");
+  el("line", { x1: NODES.gateway.x, y1: NODES.gateway.y, x2: NODES.order.x, y2: NODES.order.y, class: "wire" }, wires);
+  for (const [name, n] of Object.entries(NODES)) {
+    if (name !== "gateway") el("line", { x1: n.x, y1: n.y, x2: HUB.x, y2: HUB.y, class: "wire" }, wires);
+    const g = el("g", { class: "node", id: "node-" + name }, nodes);
+    el("rect", { x: n.x - 58, y: n.y - 24, width: 116, height: 48, rx: 10 }, g);
+    el("text", { x: n.x, y: n.y - 2 }, g, name);
+    el("text", { x: n.x, y: n.y + 14, class: "role" }, g, n.role);
+  }
+}
+
+function flash(name, cls = "hit", ms = 700) {
+  const node = $("node-" + name);
+  if (!node) return;
+  node.classList.add(cls);
+  if (cls === "hit") setTimeout(() => node.classList.remove(cls), ms);
+}
+
+function travel(from, to, label, bad = false) {
+  return new Promise((resolve) => {
+    const a = from === "hub" ? HUB : NODES[from], b = to === "hub" ? HUB : NODES[to];
+    if (!a || !b || reduceMotion) return resolve();
+    const dot = el("circle", { r: 7, class: bad ? "dot bad" : "dot" }, $("dots"));
+    const text = label ? el("text", { class: "dotlabel" }, $("dots"), label) : null;
+    const start = performance.now(), dur = 650;
+    (function step(now) {
+      const t = Math.min(1, (now - start) / dur), e = t < .5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      const x = a.x + (b.x - a.x) * e, y = a.y + (b.y - a.y) * e;
+      dot.setAttribute("cx", x); dot.setAttribute("cy", y);
+      if (text) { text.setAttribute("x", x); text.setAttribute("y", y - 12); }
+      if (t < 1) requestAnimationFrame(step); else { dot.remove(); text && text.remove(); resolve(); }
+    })(start);
+  });
+}
+
+// Events arrive in batches; play their animations one after another.
+let queue = Promise.resolve();
+function animateEvent(ev) {
+  queue = queue.then(async () => {
+    if (ev.dead_letter) { flash(ev.failed_at, "down"); return; }
+    flash(ev.source);
+    await travel(ev.source, "hub", ev.type);
+    await Promise.all(ev.to.map((t) => travel("hub", t, "").then(() => flash(t))));
+  });
+}
+
+let t0 = 0;
+// Event lines use server time (occurred_at minus the order's created_at), so
+// the gaps between hops are real, not when our poll happened to see them.
+let serverT0 = 0;
+function addLine(text, cls = "", at = null) {
+  const li = document.createElement("li");
+  // at: seconds on the server clock; null: our own clock; NaN: no time shown.
+  const secs = Number.isNaN(at) ? ""
+    : Math.max(0, at !== null ? at : (performance.now() - t0) / 1000).toFixed(1) + "s";
+  li.innerHTML = `<span class="t">${secs}</span><span class="${cls}"></span>`;
+  li.lastChild.textContent = text;
+  $("timeline").appendChild(li);
+}
+
+function describe(ev) {
+  if (ev.dead_letter) return `✗ ${ev.type} dead-lettered after ${ev.attempts} failed deliveries to ${ev.failed_at}`;
+  const to = ev.to.length ? ev.to.join(", ") : "(nobody subscribed, just a record)";
+  const extra = ev.data.amount_cents ? ` · RM${(ev.data.amount_cents / 100).toFixed(2)}`
+              : ev.data.reason ? ` · ${ev.data.reason}` : "";
+  return `${ev.source} → ${ev.type} → ${to}${extra}`;
+}
+
+async function loadProducts() {
+  const r = await fetch(API + "/products");
+  const products = await r.json();
+  $("product").innerHTML = "";
+  for (const p of products) {
+    const o = document.createElement("option");
+    o.value = p.id;
+    o.textContent = `${p.name} · RM${(p.price_cents / 100).toFixed(2)} · ${p.stock} left`;
+    $("product").appendChild(o);
+  }
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function placeOrder() {
+  $("go").disabled = true;
+  $("timeline").innerHTML = "";
+  document.querySelectorAll(".node.down").forEach((n) => n.classList.remove("down"));
+  const scenario = document.querySelector("input[name=scenario]:checked").value;
+  // On a phone the diagram sits below the form: bring it into view.
+  if (matchMedia("(max-width: 820px)").matches) $("live").scrollIntoView({ behavior: "smooth" });
+  const body = { product_id: Number($("product").value), qty: Number($("qty").value), scenario };
+  t0 = performance.now();
+  addLine(`browser → POST /api/orders (${scenario.replace("_", " ")})`);
+  flash("gateway");
+  travel("gateway", "order", "POST /orders");
+  const r = await fetch(API + "/orders", { method: "POST", headers: {
+    "content-type": "application/json", "idempotency-key": crypto.randomUUID() }, body: JSON.stringify(body) });
+  const order = await r.json();
+  if (!r.ok) {
+    $("status").textContent = order.detail || `Error ${r.status}`;
+    $("go").disabled = false;
+    return;
+  }
+  serverT0 = order.created_at ? Date.parse(order.created_at) : 0;
+  addLine(`order ${order.id} saved as PENDING, answered 202 in ${((performance.now() - t0) / 1000).toFixed(1)}s`, "note");
+  if (scenario === "catalog_down") addLine("catalog will fail every delivery; Pub/Sub retries with backoff…", "note");
+  if (scenario === "slow_payment") addLine("payment will take longer than the order timeout…", "note");
+
+  let after = 0, status = "PENDING", settledAt = 0;
+  const deadline = performance.now() + 90_000;
+  while (performance.now() < deadline) {
+    const [o, events] = await Promise.all([
+      fetch(`${API}/orders/${order.id}`).then((x) => x.json()),  // also triggers the lazy timeout sweep
+      fetch(`${API}/feed?order=${encodeURIComponent(order.ref)}&after=${after}`).then((x) => x.ok ? x.json() : []),
+    ]);
+    events.sort((a, b) => Date.parse(a.occurred_at) - Date.parse(b.occurred_at));
+    for (const ev of events) {
+      after = Math.max(after, ev.seq);
+      const at = serverT0 && !ev.dead_letter ? (Date.parse(ev.occurred_at) - serverT0) / 1000 : null;
+      addLine(describe(ev), ev.dead_letter ? "dead" : "", at);
+      animateEvent(ev);
+    }
+    if (o.status !== status) {
+      status = o.status;
+      if (FINAL.has(status)) {
+        settledAt = performance.now();
+        addLine(`order ${status}${o.reason ? " (" + o.reason + ")" : ""}`, status === "COMPLETED" ? "" : "dead", NaN);
+      }
+    }
+    $("status").innerHTML = `Order #${order.id} <span class="badge ${status}">${status}</span>`;
+    // Keep listening after the order settles: compensation (stock released,
+    // refunds, emails) is still flowing. Stop after 12 quiet seconds.
+    if (settledAt && performance.now() - settledAt > 12_000) break;
+    await sleep(600);
+  }
+  await queue;
+  $("go").disabled = false;
+  loadProducts();
+}
+
+drawDiagram();
+loadProducts().catch(() => { $("product").innerHTML = "<option>Shop is waking up… reload in a few seconds</option>"; });
+$("go").addEventListener("click", () => placeOrder().catch((e) => {
+  $("status").textContent = "Something went wrong: " + e.message; $("go").disabled = false; }));
+</script>
+</body>
+</html>

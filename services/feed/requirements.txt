@@ -1,0 +1,10 @@
+fastapi==0.115.*
+uvicorn[standard]==0.32.*
+httpx==0.27.*
+pytest==8.*
+opentelemetry-sdk==1.45.*
+opentelemetry-exporter-otlp-proto-http==1.45.*
+opentelemetry-instrumentation-fastapi==0.66b0
+opentelemetry-instrumentation-httpx==0.66b0
+opentelemetry-exporter-gcp-trace==1.15.*
+sqlalchemy==2.0.*  # tests only: shared.eventbus.make_push builds push bodies

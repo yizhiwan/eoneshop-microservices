@@ -37,7 +37,8 @@ def order_created(ref, product_id, qty, event_id=None):
 def test_reserves_stock_and_announces(client, published):
     assert client.post("/pubsub/push", json=order_created("r1", 2, 3)).status_code == 204
     assert stock(client, 2) == 7
-    assert published() == [("stock.reserved", {"order_ref": "r1", "product_id": 2, "qty": 3, "amount_cents": 10500})]
+    assert published() == [("stock.reserved", {"order_ref": "r1", "product_id": 2, "qty": 3, "amount_cents": 10500,
+                                           "scenario": "normal"})]
 
 
 def test_out_of_stock_rejected(client, published):
@@ -122,3 +123,25 @@ def test_publishes_to_real_pubsub_with_token(client, monkeypatch):
     assert str(req.url) == ("https://pubsub.googleapis.com/v1/projects/eonelabs-portfolio/"
                             "topics/eoneshop.stock.reserved:publish")
     assert req.headers["authorization"] == "Bearer tok"
+
+
+def test_scenario_passed_on_to_payment(client, published):
+    push = make_push("order.created", {"order_ref": "sc1", "product_id": 1, "qty": 1, "scenario": "decline_payment"})
+    client.post("/pubsub/push", json=push)
+    assert published()[0][1]["scenario"] == "decline_payment"
+
+
+def test_catalog_down_scenario_fails_that_order_only(client, published):
+    down = make_push("order.created", {"order_ref": "sc2", "product_id": 1, "qty": 1, "scenario": "catalog_down"})
+    assert client.post("/pubsub/push", json=down).status_code == 503
+    assert stock(client, 1) == 20
+    client.post("/pubsub/push", json=order_created("sc3", 1, 1))
+    assert stock(client, 1) == 19
+
+
+def test_restock_tops_up_low_products(client, monkeypatch):
+    from app import main as catalog_main
+    client.post("/pubsub/push", json=order_created("rs1", 3, 4))
+    assert stock(client, 3) == 1
+    monkeypatch.setattr(catalog_main, "RESTOCK_BELOW", 2)
+    assert stock(client, 3) == 5
