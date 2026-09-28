@@ -18,7 +18,8 @@ def handler(request: httpx.Request) -> httpx.Response:
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setattr(main, "transport", httpx.MockTransport(handler))
-    monkeypatch.setattr(main, "_writes", {})
+    monkeypatch.setattr(main, "writes", main.RateLimiter(main.WRITES_PER_MINUTE))
+    monkeypatch.setattr(main, "reads", main.RateLimiter(main.READS_PER_MINUTE))
     monkeypatch.setitem(main.ROUTES, "products", "http://catalog")
     monkeypatch.setitem(main.ROUTES, "orders", "http://order")
     with TestClient(main.app) as c:
@@ -71,7 +72,7 @@ def test_no_token_locally(client):
 
 
 def test_rate_limits_writes_per_ip(client, monkeypatch):
-    monkeypatch.setattr(main, "WRITES_PER_MINUTE", 3)
+    monkeypatch.setattr(main, "writes", main.RateLimiter(3))
     ip = {"x-forwarded-for": "203.0.113.7, 10.0.0.1"}
     codes = [client.post("/api/orders", json={}, headers=ip).status_code for _ in range(4)]
     assert codes == [200, 200, 200, 429]
@@ -90,3 +91,36 @@ def test_serves_visualizer_and_routes_feed(client):
     assert page.status_code == 200 and "Watch an order travel" in page.text
     body = client.get("/api/feed?order=r1&after=3").json()
     assert body["path"] == "/feed" and body["query"] == "order=r1&after=3"
+
+
+def test_rate_limits_reads_per_ip_with_retry_after(client, monkeypatch):
+    monkeypatch.setattr(main, "reads", main.RateLimiter(3))
+    ip = {"x-forwarded-for": "203.0.113.8"}
+    codes = [client.get("/api/orders/1", headers=ip).status_code for _ in range(4)]
+    assert codes == [200, 200, 200, 429]
+    blocked = client.get("/api/orders/1", headers=ip)
+    assert blocked.status_code == 429 and int(blocked.headers["retry-after"]) >= 1
+    # the page itself and health checks are never limited
+    assert client.get("/", headers=ip).status_code == 200
+    assert client.get("/health", headers=ip).status_code == 200
+
+
+def test_default_read_budget_fits_the_visualizer(client):
+    """The page polls /orders and /feed every 0.6 s: 200 GETs a minute."""
+    limiter = main.RateLimiter(main.READS_PER_MINUTE)
+    t, allowed = 0.0, 0
+    while t < 60:
+        allowed += limiter.allow("viewer", now=t) + limiter.allow("viewer", now=t)
+        t += 0.6
+    assert allowed == 200
+
+
+def test_token_bucket_refills_and_forgets_idle_clients():
+    limiter = main.RateLimiter(60)  # one token per second
+    assert all(limiter.allow("a", now=0.0) for _ in range(60))
+    assert not limiter.allow("a", now=0.0)
+    assert limiter.allow("a", now=1.0)  # one second later: one new token
+    limiter.MAX_KEYS = 2
+    limiter.allow("b", now=100.0)
+    limiter.allow("c", now=100.0)  # third key, "a" has been idle for 99 s
+    assert "a" not in limiter.buckets

@@ -42,14 +42,50 @@ FORWARD_HEADERS = ("content-type", "idempotency-key")
 # Must exceed the worst-case time of the slowest route behind it (see ADR 0002),
 # otherwise the client gets a 503 for an order that actually completed.
 TIMEOUT = httpx.Timeout(15.0, connect=1.0)
-# Writes per client IP per minute. In memory, so per instance: a speed bump
-# for a public demo, not a security boundary.
+# Per-IP request budgets for /api/*. In memory, so per instance: a speed bump
+# that keeps a bot from running up Cloud Run, not a security boundary.
+# Reads: the visualizer polls two endpoints every 0.6 s while an order runs
+# (~200 GETs/min), so the read budget must sit comfortably above that.
 WRITES_PER_MINUTE = int(os.getenv("WRITES_PER_MINUTE", "20"))
+READS_PER_MINUTE = int(os.getenv("READS_PER_MINUTE", "300"))
+
+
+class RateLimiter:
+    """Per-key token bucket: `per_minute` tokens, refilled continuously, so a
+    short burst is fine but a sustained flood is not. Two floats per client,
+    and idle clients are forgotten, so many IPs can't fill the memory."""
+
+    MAX_KEYS = 10_000
+
+    def __init__(self, per_minute: int):
+        self.capacity = float(per_minute)
+        self.rate = per_minute / 60.0  # tokens per second
+        self.buckets: dict[str, tuple[float, float]] = {}
+
+    def allow(self, key: str, now: float | None = None) -> bool:
+        now = time.monotonic() if now is None else now
+        tokens, last = self.buckets.get(key, (self.capacity, now))
+        tokens = min(self.capacity, tokens + (now - last) * self.rate)
+        allowed = tokens >= 1
+        self.buckets[key] = (tokens - 1 if allowed else tokens, now)
+        if len(self.buckets) > self.MAX_KEYS:
+            self._forget_idle(now)
+        return allowed
+
+    def retry_after(self, key: str) -> int:
+        tokens, _ = self.buckets.get(key, (self.capacity, 0.0))
+        return max(1, int((1 - tokens) / self.rate) + 1)
+
+    def _forget_idle(self, now: float) -> None:
+        # A bucket that would be full again has nothing worth remembering.
+        full_after = self.capacity / self.rate
+        self.buckets = {k: v for k, v in self.buckets.items() if now - v[1] < full_after}
 
 # Tests swap this for an httpx.MockTransport.
 transport: httpx.AsyncBaseTransport | None = None
 _http: httpx.AsyncClient | None = None
-_writes: dict[str, list[float]] = {}
+writes = RateLimiter(WRITES_PER_MINUTE)
+reads = RateLimiter(READS_PER_MINUTE)
 
 
 @asynccontextmanager
@@ -85,23 +121,17 @@ def _client_ip(request: Request) -> str:
     return forwarded.split(",")[0].strip() or (request.client.host if request.client else "?")
 
 
-def _allow_write(ip: str, now: float | None = None) -> bool:
-    now = now or time.monotonic()
-    recent = [t for t in _writes.get(ip, []) if now - t < 60]
-    if len(recent) >= WRITES_PER_MINUTE:
-        _writes[ip] = recent
-        return False
-    _writes[ip] = recent + [now]
-    return True
-
-
 async def _forward(request: Request, upstream: str, path: str) -> Response:
     request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
     headers = {h: request.headers[h] for h in FORWARD_HEADERS if h in request.headers}
     headers["x-request-id"] = request_id
-    if request.method != "GET" and not _allow_write(_client_ip(request)):
-        return Response('{"detail":"slow down: too many writes, try again in a minute"}', 429,
-                        media_type="application/json", headers={"x-request-id": request_id})
+    ip = _client_ip(request)
+    limiter, kind = (reads, "requests") if request.method == "GET" else (writes, "orders")
+    if not limiter.allow(ip):
+        wait = limiter.retry_after(ip)
+        return Response(f'{{"detail":"slow down: too many {kind}, try again in {wait}s"}}', 429,
+                        media_type="application/json",
+                        headers={"x-request-id": request_id, "retry-after": str(wait)})
     try:
         if gcp.on_cloud_run():
             # The audience is the target service's own URL; Cloud Run checks it.
