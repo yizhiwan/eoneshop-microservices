@@ -1,0 +1,52 @@
+TITLE: Learning Microservices in Public, Part 5: One Trace per Order, and the Bug It Found
+TAGS: microservices, observability, opentelemetry, tracing, learning-in-public
+
+By the end of Part 4, one order touched five services through a broker, with retries, duplicates, timeouts and compensations. Debugging meant opening six logs side by side and searching for an order number. I wanted to see one order as one picture.
+
+Code: github.com/yizhiwan/eoneshop-microservices
+
+Distributed tracing in one paragraph
+
+A trace is the story of one request. Each piece of work inside it is a span, with a start time, an end time, and a parent span. When service A calls service B, it passes a small header called traceparent, and B's spans become children of A's. Put them on a timeline and you get a waterfall, the whole request as one picture. I used OpenTelemetry, the open standard for this.
+
+For plain HTTP calls it's nearly free: instrument FastAPI and the HTTP client, and the header is passed along automatically. The gateway-to-order-svc hop just worked.
+
+The hard part: events have no headers to follow
+
+Most of my order doesn't travel over direct HTTP calls. It travels as events. An event sits in an outbox table, gets picked up later by a background thread, goes to the broker, and is delivered to some other service whenever the broker gets round to it. There's no single call for a header to ride along with.
+
+So the trace context has to travel inside the event itself. When a service stages an event in its outbox, it also stores the current traceparent in the event body. That's committed in the same transaction, so it can't get lost. When the relay publishes it, it opens a "publish" span under that context, and records how long the event waited in the outbox. When the consumer receives it, it opens a "process" span under the same context.
+
+One more case: the timeout sweeper from Part 4 runs on its own, with no incoming request and so no trace. I store each order's trace context on the order row. When the sweeper cancels an order, its work, and all the compensation that follows, lands in the original order's trace.
+
+Result: one order, one trace, all five services.
+
+A small collector instead of Jaeger
+
+The usual tool to view traces is Jaeger, which I'd normally run in Docker. Docker wasn't running on this machine, so I wrote a small collector instead, about 130 lines. It accepts the standard OpenTelemetry format, keeps recent traces in memory, and draws a waterfall as text in the terminal. In production the same data will go to Google Cloud Trace.
+
+The best trace so far is the catalog-down scenario from Part 4. In one picture you can see the order being created, catalog failing eight times with the broker backing off (0.5 seconds, 1, 2, 4), the timeout firing, the cancellation fanning out to three services, and finally, seven seconds in, catalog's late delivery arriving and doing nothing because of the tombstone. That's the whole saga, drawn automatically.
+
+The bug the trace found
+
+Looking at a perfectly normal order, I noticed one line in the log appeared twice: "order completed".
+
+The broker was delivering every message twice (my test setting). Two copies of the same event arrived at the same moment. Both asked "have I handled this event before?", both got "no", and both ran the handler. Then both tried to commit. The database's unique constraint rejected the second, and its changes were rolled back.
+
+In Part 3 I called that a success. The database is the real guarantee, and I counted 3 email records, not 6. But the database can only roll back the database. The log line had already been written. If the notification service sent real emails, the customer would have received two. My "3 emails" only counted rows in a table.
+
+To be sure, I wrote a test: four threads deliver the same event at exactly the same moment. On the old code it failed five times out of five.
+
+The fix is to claim first. Before running the handler, the service writes and flushes its "I'm handling this event" row. That takes a lock in the database. A second copy arriving at the same time waits on that lock, then fails the unique constraint before it runs anything at all. Same test, new code: passed five times out of five.
+
+Two smaller things the traces showed
+
+The first publish from every service took about 150 milliseconds. It was the same HTTP client cost from Part 4, paid on first use. The client is now created when the service starts.
+
+And my JSON log lines were sometimes broken, with two lines glued together. Python's print writes the text and the newline as two separate writes, and with seven processes sharing one output, lines got spliced. One write per line fixed it.
+
+What I'd tell myself
+
+I added tracing to see the system, and expected it to confirm that things worked. Instead, the first normal order I looked at showed a bug I had already declared fixed. Duplicates are cheap to handle when all the effects live in one database, and a genuine problem the moment they don't.
+
+Next, Part 6: leaving my laptop. Deploying all of this to Cloud Run, with Google Pub/Sub in place of my little broker.

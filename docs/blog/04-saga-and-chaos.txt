@@ -1,0 +1,57 @@
+TITLE: Learning Microservices in Public, Part 4: Undo Buttons, Timeouts, and Breaking Things on Purpose
+TAGS: microservices, saga, chaos-engineering, reliability, learning-in-public
+
+Part 3 ended with a known hole. When a payment was declined, the order was cancelled, but the stock that catalog had reserved for it was never given back. In the monolith, a database transaction undid everything automatically. With five services and five databases there is no transaction to roll back. Every step has already committed somewhere else.
+
+Code: github.com/yizhiwan/eoneshop-microservices
+
+The saga: every step gets an undo
+
+The answer is a pattern called a saga. Instead of one big transaction, you get a chain of small ones, and every step that can be undone has a matching compensation step. Reserve stock, and the undo is release stock. Charge a card, and the undo is a refund.
+
+There are two ways to run a saga. With an orchestrator, one service tells every other service what to do next. With choreography, nobody is in charge and each service reacts to events. My flow is small, so I chose choreography.
+
+The design decision I'm happiest with: however an order dies, it always ends in the same event, order.cancelled. Out of stock, payment declined, or timed out, it doesn't matter. Order-svc owns the order, so only order-svc decides it's dead. Catalog and payment each listen for that one event and undo their own step. They don't need to know why.
+
+Each service also remembers what it did for each order. Catalog keeps a reservations table and payment keeps a charges table. So "undo" means "undo exactly what I did", never "trust the numbers in someone else's event".
+
+The failure nobody reports
+
+Declined payments are easy because someone announces them. The harder failure is silence. If catalog is down, the order.created event is retried a few times, then dead-lettered, and nobody ever says anything. The order would sit at PENDING forever.
+
+So order-svc has a sweeper: any order still PENDING after a timeout gets cancelled, and the usual compensation follows. A timeout is just another way to fail.
+
+Events that arrive too late
+
+Timeouts create a new problem. Say catalog is down. The order times out, and order.cancelled goes out. Then catalog comes back, and its retries deliver the old order.created. Catalog would happily reserve stock for an order that died minutes ago, and nobody would ever release it.
+
+The fix is a tombstone. When a cancel arrives for an order a service has never seen, it writes a small "VOID" record for it. When the late order.created finally shows up, catalog finds the tombstone and does nothing. Payment does the same, so a slow payment can't charge a cancelled order. If the charge did go through before the cancel arrived, payment refunds it instead.
+
+A chaos switch
+
+None of this means much unless I can watch it happen. So every service now has a chaos switch that you flip over HTTP while it's running. It can make a service fail a share of its incoming events, add latency, or decline every payment.
+
+Then I wrote a script that runs four scenarios through the gateway, with the broker delivering every message twice:
+
+1. A normal order: completed.
+2. A declined payment: cancelled, and the stock comes back.
+3. Catalog failing every event: cancelled by the timeout. Once catalog recovers, the late event hits the tombstone and the stock is untouched.
+4. Payment slower than the timeout: cancelled, and the late charge is blocked.
+
+After every scenario the script checks that stock ended exactly where it started. All four pass.
+
+The surprise: 130 milliseconds
+
+While timing the scenarios, a normal order took 2.6 seconds. That's far too slow for seven hops that each do almost nothing. The broker's log showed every hop costing about 0.3 seconds.
+
+It wasn't the database. A write took 8 milliseconds. It was the HTTP client. Creating a new httpx client costs about 130 milliseconds, because it loads the full list of trusted certificate authorities. My broker created one for every delivery, the outbox for every publish, and the gateway for every request. Two per hop, 270 milliseconds per hop, seven hops.
+
+One long-lived client per process: 2.6 seconds became 0.6.
+
+It also meant I owed a correction. In Part 3 I first wrote that orders finished "in under a second" after fixing the localhost problem. My stopwatch was broken. The real number was about 2.5 seconds, and this was where the rest went.
+
+What I'd tell myself
+
+Compensation is easy to draw on a whiteboard and fiddly in practice. The hard cases are all about timing: the cancel that arrives before the thing it cancels, the payment that succeeds after you gave up waiting. Writing each case down as a scenario and breaking the system on purpose was the only way I found to be sure.
+
+Next, in Part 5: seeing one order as one picture across all these services, and the bug that picture revealed.
