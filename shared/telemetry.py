@@ -4,6 +4,7 @@ HTTP hops are traced automatically (FastAPI + httpx instrumentation, W3C
 traceparent headers). Event hops are not HTTP-to-HTTP, so the trace context
 travels inside the event instead: see EventBus.add / relay_once / handle_push.
 """
+import asyncio
 import json
 import os
 import sys
@@ -41,7 +42,45 @@ def setup(service: str, app=None) -> None:
     if app is not None:
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
         FastAPIInstrumentor.instrument_app(app, excluded_urls=EXCLUDED_URLS, exclude_spans=["receive", "send"])
+        if os.getenv("OTEL_TRACES_EXPORTER") == "gcp":
+            flush_per_request(app)
 
+
+def flush_per_request(app) -> None:
+    """Export each request's spans before the request ends (ADR 0006).
+
+    Cloud Run pauses the CPU once a response is complete, so the batch
+    exporter's background thread would never get to send anything. This wraps
+    the app *outside* the OpenTelemetry middleware: it holds back the last
+    chunk of the response, lets OTel close the server span, flushes all spans,
+    and only then sends that last chunk. Costs one export round trip per request.
+    """
+    build_inner = app.build_middleware_stack  # already wrapped by OTel
+
+    def build():
+        inner = build_inner()
+
+        async def flushing(scope, receive, send):
+            if scope["type"] != "http":
+                return await inner(scope, receive, send)
+            held = []
+
+            async def hold_last(message):
+                if message["type"] == "http.response.body" and not message.get("more_body", False):
+                    held.append(message)
+                else:
+                    await send(message)
+
+            try:
+                await inner(scope, receive, hold_last)
+            finally:
+                await asyncio.to_thread(_provider.force_flush, 3000)
+                for message in held:
+                    await send(message)
+
+        return flushing
+
+    app.build_middleware_stack = build
 
 def add_span_processor(processor: SpanProcessor) -> None:
     """For tests: capture spans in memory."""
