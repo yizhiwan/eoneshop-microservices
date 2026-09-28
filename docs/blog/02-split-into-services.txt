@@ -1,0 +1,51 @@
+TITLE: Learning Microservices in Public, Part 2: When a Function Call Becomes a Network Call
+TAGS: microservices, architecture, fastapi, reliability, learning-in-public
+
+In Part 1 I built EoneShop as a monolith: one FastAPI app with catalog, orders and payment modules talking through plain function calls. This time I split it into four services and found out what that costs.
+
+Code: github.com/yizhiwan/eoneshop-microservices
+
+The split
+
+1. gateway: the only public entry point. It routes /api/products to catalog and /api/orders to order, and gives every request an x-request-id so I can follow it across services.
+2. catalog-svc: products and stock, with its own database.
+3. order-svc: orders, with its own database.
+4. payment-svc: the fake payment provider.
+
+Each service owns its data. Nobody else reads catalog's tables. If order-svc wants stock reserved, it has to ask catalog over HTTP. That rule is the whole point: it's what lets each service change and deploy on its own.
+
+What changed in the code
+
+In the monolith, reserve_stock was a function call that could not "time out". Now it's an HTTP request, and a network call has more outcomes than success or failure:
+
+1. It succeeds.
+2. It fails cleanly (409 out of stock, 404 unknown product).
+3. The service is down and the connection is refused.
+4. It's slow, and you have to decide how long to wait.
+5. It worked on the other side, but the reply never reached you.
+
+Number 5 is the nasty one. So order-svc now has explicit timeouts, and it only retries when the connection itself failed, meaning the request never arrived. Retrying a POST that timed out could reserve stock twice.
+
+I also lost the single database transaction. Placing an order is now three separate commits in three services. When payment is declined, order-svc has to call catalog again to release the stock. If that call fails, the stock stays reserved. For now I just log a warning. Parts 3 and 4 fix that properly.
+
+Testing each service alone
+
+Every service has its own tests, with its neighbours faked using httpx's MockTransport. The order-svc tests can say "catalog is down" or "payment declines" without starting anything. 13 tests, and CI runs each service as its own job.
+
+The bug I found: timeout budgets
+
+Then I ran all four services together and stopped payment-svc to see what happens. The client got a 503 "upstream unavailable" from the gateway.
+
+But when I checked the order, it existed. It was CANCELLED, and the stock had been released correctly.
+
+What happened: order-svc spent about 9 seconds trying to reach the dead payment service (retries included) before giving up and cancelling cleanly. The gateway only waited 5 seconds. So the gateway gave up first and told the client "error", while the order finished a few seconds later with a clean result the client never saw.
+
+Flip it around and it's worse: payment is slow but approves. The client sees an error, tries again, and pays twice.
+
+The rule I took from it: in a chain of synchronous calls, each hop's timeout must be longer than the worst case of everything behind it. You can't choose timeouts one service at a time. I raised the gateway to 15 seconds, cut the retries, and wrote it up as an Architecture Decision Record.
+
+A footnote I only understood in Part 3: most of those 9 seconds weren't the retries at all. They were Windows and "localhost". More on that next time.
+
+What I'd tell myself before starting
+
+Splitting a monolith is mostly not about Docker. It's about accepting that every call can now fail halfway, and deciding what should happen when it does. A synchronous chain is also only as fast and as reliable as its weakest service. That's the problem Part 3 attacks, by letting the services talk through events instead of waiting on each other.
