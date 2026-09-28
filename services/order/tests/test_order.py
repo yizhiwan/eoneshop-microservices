@@ -1,74 +1,68 @@
-"""order-svc tests, with catalog + payment faked via httpx.MockTransport."""
 import json
-import os
 
-os.environ["DATABASE_URL"] = "sqlite:///./test_order.db"
-
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app import clients
 from app.db import Base, engine
-from app.main import app
-
-
-class FakeUpstreams:
-    def __init__(self):
-        self.stock, self.price = 10, 3500
-        self.catalog_down = False
-        self.released = 0
-
-    def handler(self, request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        body = json.loads(request.content) if request.content else {}
-        if path.endswith("/reserve"):
-            if self.catalog_down:
-                raise httpx.ConnectError("down")
-            if body["qty"] > self.stock:
-                return httpx.Response(409, json={"detail": "Insufficient stock"})
-            self.stock -= body["qty"]
-            return httpx.Response(200, json={"id": 1, "price_cents": self.price, "stock": self.stock})
-        if path.endswith("/release"):
-            self.stock += body["qty"]
-            self.released += body["qty"]
-            return httpx.Response(200, json={})
-        if path == "/charges":
-            return httpx.Response(200, json={"approved": body["amount_cents"] < 10000})
-        return httpx.Response(404)
+from app.main import app, bus
+from shared.eventbus import make_push
 
 
 @pytest.fixture
-def up():
-    return FakeUpstreams()
-
-
-@pytest.fixture
-def client(up):
+def client():
     Base.metadata.drop_all(engine)
-    clients.transport = httpx.MockTransport(up.handler)
     with TestClient(app) as c:
         yield c
-    clients.transport = None
 
 
-def test_completed(client, up):
-    r = client.post("/orders", json={"product_id": 1, "qty": 2})
-    assert r.status_code == 201 and r.json()["status"] == "COMPLETED"
-    assert up.stock == 8
+@pytest.fixture
+def published():
+    sent = []
+    bus.sender = lambda topic, body: sent.append((topic, json.loads(body)["data"]))
+
+    def flush():
+        bus.relay_once()
+        return sent
+    return flush
 
 
-def test_payment_declined_releases_stock(client, up):
-    r = client.post("/orders", json={"product_id": 1, "qty": 3})  # 3 x 3500 = 10500
-    assert r.json()["status"] == "CANCELLED"
-    assert up.released == 3 and up.stock == 10
+def place(client, **headers):
+    return client.post("/orders", json={"product_id": 1, "qty": 2}, headers=headers)
 
 
-def test_out_of_stock(client, up):
-    up.stock = 2
-    assert client.post("/orders", json={"product_id": 1, "qty": 3}).status_code == 409
+def test_place_order_is_pending_and_emits_event(client, published):
+    r = place(client)
+    assert r.status_code == 202 and r.json()["status"] == "PENDING"
+    ref = r.json()["ref"]
+    assert published() == [("order.created", {"order_ref": ref, "product_id": 1, "qty": 2})]
 
 
-def test_catalog_down_returns_503(client, up):
-    up.catalog_down = True
-    assert client.post("/orders", json={"product_id": 1, "qty": 1}).status_code == 503
+def test_idempotency_key_returns_same_order(client, published):
+    first = place(client, **{"Idempotency-Key": "k-123"})
+    again = place(client, **{"Idempotency-Key": "k-123"})
+    assert first.status_code == 202 and again.status_code == 200
+    assert again.json()["id"] == first.json()["id"]
+    assert len(published()) == 1
+
+
+def test_payment_succeeded_completes(client, published):
+    o = place(client).json()
+    client.post("/pubsub/push", json=make_push("payment.succeeded", {"order_ref": o["ref"], "amount_cents": 5000}))
+    got = client.get(f"/orders/{o['id']}").json()
+    assert got["status"] == "COMPLETED" and got["total_cents"] == 5000
+    assert published()[-1] == ("order.completed", {"order_ref": o["ref"], "status": "COMPLETED", "reason": None})
+
+
+def test_stock_rejected_cancels(client):
+    o = place(client).json()
+    client.post("/pubsub/push", json=make_push("stock.rejected", {"order_ref": o["ref"], "reason": "out_of_stock"}))
+    got = client.get(f"/orders/{o['id']}").json()
+    assert got["status"] == "CANCELLED" and got["reason"] == "out_of_stock"
+
+
+def test_late_event_does_not_reopen_final_order(client, published):
+    o = place(client).json()
+    client.post("/pubsub/push", json=make_push("payment.failed", {"order_ref": o["ref"], "amount_cents": 5000}))
+    client.post("/pubsub/push", json=make_push("payment.succeeded", {"order_ref": o["ref"], "amount_cents": 5000}))
+    assert client.get(f"/orders/{o['id']}").json()["status"] == "CANCELLED"
+    assert [t for t, _ in published()] == ["order.created", "order.cancelled"]

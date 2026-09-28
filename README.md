@@ -7,7 +7,7 @@ microservices on Cloud Run. Live demo (coming): https://micro.eonelabs.my
 |---|---|---|
 | 1 | Monolith baseline | ✅ |
 | 2 | Split into services + API gateway | ✅ |
-| 3 | Async events (Pub/Sub), idempotency, outbox | |
+| 3 | Async events (Pub/Sub), idempotency, outbox | ✅ |
 | 4 | Saga + compensation, chaos toggle | |
 | 5 | Observability (OpenTelemetry, Cloud Trace) | |
 | 6 | Deploy to Cloud Run | |
@@ -25,21 +25,30 @@ python -m venv .venv && .venv/Scripts/python -m pip install -r requirements.txt
 Place an order: `POST /orders {"product_id": 1, "qty": 2}`.
 Orders totalling RM100+ fail payment on purpose and roll back stock.
 
-## Run the services (Phase 2)
+## Run the services (Phase 3)
 
 ```bash
-docker compose up --build        # gateway on http://localhost:8080
-curl localhost:8080/api/products
-curl -X POST localhost:8080/api/orders -H 'content-type: application/json' -d '{"product_id":1,"qty":2}'
+python scripts/dev.py            # all 6 services, no Docker; gateway on http://127.0.0.1:8080
+python scripts/dev.py --dupes    # broker delivers every message twice
+docker compose up --build        # same thing in containers
+```
+
+```bash
+curl -X POST 127.0.0.1:8080/api/orders -H 'content-type: application/json'      -H 'Idempotency-Key: my-first-order' -d '{"product_id":1,"qty":2}'   # 202 PENDING
+curl 127.0.0.1:8080/api/orders/1          # COMPLETED a moment later
+curl 127.0.0.1:8080/api/events            # every publish / delivery / retry
+curl 127.0.0.1:8080/api/notifications     # the "emails"
 ```
 
 ```
-client -> gateway :8080 -> order-svc -> catalog-svc  (reserve / release stock)
-                    |               \-> payment-svc  (charge)
-                    \-> catalog-svc  (GET /products)
+order-svc --order.created--> catalog-svc --stock.reserved--> payment-svc
+    ^                            |                               |
+    +------ stock.rejected ------+       payment.succeeded/failed |
+    +-------------------------------------------------------------+
+order-svc --order.completed/cancelled--> notification-svc
+            (all through pubsub-lite; every service has an outbox)
 ```
 
-Each service owns its own database and is tested alone, with its neighbours
-faked via `httpx.MockTransport`.
+Each service owns its database and is tested alone.
 
 Decisions are logged in [docs/adr](docs/adr).

@@ -9,7 +9,9 @@ def handler(request: httpx.Request) -> httpx.Response:
     if request.url.host == "down":
         raise httpx.ConnectError("down")
     return httpx.Response(200, json={"host": request.url.host, "path": request.url.path,
-                                     "rid": request.headers["x-request-id"]})
+                                     "query": str(request.url.query, "ascii"),
+                                     "rid": request.headers["x-request-id"],
+                                     "idem": request.headers.get("idempotency-key")})
 
 
 @pytest.fixture
@@ -38,3 +40,9 @@ def test_unknown_service_404(client):
 def test_upstream_down_503(client, monkeypatch):
     monkeypatch.setitem(main.ROUTES, "orders", "http://down")
     assert client.get("/api/orders/1").status_code == 503
+
+
+def test_forwards_idempotency_key_and_query(client):
+    body = client.post("/api/orders", json={}, headers={"Idempotency-Key": "k1"}).json()
+    assert body["idem"] == "k1"
+    assert client.get("/api/events?after=5").json()["query"] == "after=5"

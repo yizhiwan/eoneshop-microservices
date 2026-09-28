@@ -7,9 +7,13 @@ import httpx
 from fastapi import FastAPI, Request, Response
 
 ROUTES = {
-    "products": os.getenv("CATALOG_URL", "http://localhost:8001"),
-    "orders": os.getenv("ORDER_URL", "http://localhost:8002"),
+    "products": os.getenv("CATALOG_URL", "http://127.0.0.1:8001"),
+    "orders": os.getenv("ORDER_URL", "http://127.0.0.1:8002"),
+    "notifications": os.getenv("NOTIFICATION_URL", "http://127.0.0.1:8004"),
+    # Broker delivery log, read by the Phase 7 visualizer.
+    "events": os.getenv("BROKER_URL", "http://127.0.0.1:8085"),
 }
+FORWARD_HEADERS = ("content-type", "idempotency-key")
 # Must exceed the worst-case time of the slowest route behind it (see ADR 0002),
 # otherwise the client gets a 503 for an order that actually completed.
 TIMEOUT = httpx.Timeout(15.0, connect=1.0)
@@ -32,13 +36,14 @@ async def proxy(service: str, request: Request, path: str = ""):
     if upstream is None:
         return Response(status_code=404)
     request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+    headers = {h: request.headers[h] for h in FORWARD_HEADERS if h in request.headers}
+    headers["x-request-id"] = request_id
     url = f"{upstream}/{service}" + (f"/{path}" if path else "")
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT, transport=transport) as c:
             r = await c.request(
                 request.method, url, content=await request.body(),
-                headers={"content-type": request.headers.get("content-type", "application/json"),
-                         "x-request-id": request_id},
+                params=request.query_params, headers=headers,
             )
     except httpx.HTTPError:
         return Response('{"detail":"upstream unavailable"}', 503, media_type="application/json",

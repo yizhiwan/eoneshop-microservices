@@ -5,7 +5,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        dir: [monolith, services/gateway, services/catalog, services/order, services/payment]
+        dir: [monolith, services/gateway, services/broker, services/catalog, services/order, services/payment, services/notification]
     defaults: { run: { working-directory: "${{ matrix.dir }}" } }
     steps:
       - uses: actions/checkout@v4
