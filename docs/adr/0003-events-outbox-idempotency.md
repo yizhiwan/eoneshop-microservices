@@ -45,7 +45,8 @@ POST /orders -> order-svc: PENDING + order.created           (202, returns at on
 - With `localhost` URLs an order took 14 s+ end to end. On Windows, `localhost`
   tries IPv6 `::1` first, and uvicorn only listens on IPv4, so each hop wasted
   about 2 s before falling back. 7 hops → 14 s. Local URLs now use `127.0.0.1`
-  (all 3 orders final in under 1 s). This was also most of the 9 s in ADR 0002.
+  (about 2.5 s per order; my first measurement said "under 1 s" but that timer
+  was broken, and ADR 0004 found the rest). This was also most of the 9 s in ADR 0002.
 - Duplicate delivery on: 22 deliveries, 3 emails (not 6), 0 errors.
 
 ## Consequences / known gap

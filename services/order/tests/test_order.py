@@ -66,3 +66,19 @@ def test_late_event_does_not_reopen_final_order(client, published):
     client.post("/pubsub/push", json=make_push("payment.succeeded", {"order_ref": o["ref"], "amount_cents": 5000}))
     assert client.get(f"/orders/{o['id']}").json()["status"] == "CANCELLED"
     assert [t for t, _ in published()] == ["order.created", "order.cancelled"]
+
+
+def test_sweeper_cancels_stuck_orders(client, published):
+    from datetime import datetime, timedelta, timezone
+
+    from app.main import ORDER_TIMEOUT_S, sweep_once
+    o = place(client).json()
+    assert sweep_once() == 0
+    later = datetime.now(timezone.utc) + timedelta(seconds=ORDER_TIMEOUT_S + 1)
+    assert sweep_once(now=later) == 1
+    got = client.get(f"/orders/{o['id']}").json()
+    assert got["status"] == "CANCELLED" and got["reason"] == "timeout"
+    assert published()[-1][0] == "order.cancelled"
+    # the payment that finally arrives must not revive it (payment refunds instead)
+    client.post("/pubsub/push", json=make_push("payment.succeeded", {"order_ref": o["ref"], "amount_cents": 5000}))
+    assert client.get(f"/orders/{o['id']}").json()["status"] == "CANCELLED"

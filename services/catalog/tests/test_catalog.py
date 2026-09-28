@@ -70,3 +70,33 @@ def test_outbox_retries_when_broker_down(client):
     sent = []
     bus.sender = lambda topic, body: sent.append(topic)
     assert bus.relay_once() == 1 and sent == ["stock.reserved"]
+
+
+def cancelled(ref):
+    return make_push("order.cancelled", {"order_ref": ref, "status": "CANCELLED", "reason": "payment_declined"})
+
+
+def test_cancel_releases_reservation(client, published):
+    client.post("/pubsub/push", json=order_created("s1", 2, 3))
+    client.post("/pubsub/push", json=cancelled("s1"))
+    client.post("/pubsub/push", json=cancelled("s1"))  # a second, different cancel event
+    assert stock(client, 2) == 10
+    assert [t for t, _ in published()] == ["stock.reserved", "stock.released"]
+
+
+def test_cancel_before_order_created_leaves_tombstone(client, published):
+    client.post("/pubsub/push", json=cancelled("s2"))
+    client.post("/pubsub/push", json=order_created("s2", 1, 2))
+    assert stock(client, 1) == 20
+    assert published() == []
+
+
+def test_chaos_fails_pushes(client):
+    from app.main import chaos
+    client.put("/chaos", json={"fail_rate": 1})
+    try:
+        assert client.post("/pubsub/push", json=order_created("s3", 1, 1)).status_code == 503
+        assert stock(client, 1) == 20
+    finally:
+        chaos.reset()
+    assert client.put("/chaos", json={"bogus": 1}).status_code == 422

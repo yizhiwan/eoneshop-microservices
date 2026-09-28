@@ -11,6 +11,7 @@ services:
     environment:
       CATALOG_URL: http://catalog:8080
       ORDER_URL: http://order:8080
+      PAYMENT_URL: http://payment:8080
       NOTIFICATION_URL: http://notification:8080
       BROKER_URL: http://broker:8080
   broker:
@@ -25,7 +26,9 @@ services:
         payment.succeeded=http://order:8080/pubsub/push,
         payment.failed=http://order:8080/pubsub/push,
         order.completed=http://notification:8080/pubsub/push,
-        order.cancelled=http://notification:8080/pubsub/push
+        order.cancelled=http://notification:8080/pubsub/push,
+        order.cancelled=http://catalog:8080/pubsub/push,
+        order.cancelled=http://payment:8080/pubsub/push
   catalog:
     <<: *service
     build: { context: ., dockerfile: services/catalog/Dockerfile }

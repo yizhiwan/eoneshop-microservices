@@ -19,7 +19,8 @@ def client(monkeypatch):
     monkeypatch.setattr(main, "transport", httpx.MockTransport(handler))
     monkeypatch.setitem(main.ROUTES, "products", "http://catalog")
     monkeypatch.setitem(main.ROUTES, "orders", "http://order")
-    return TestClient(main.app)
+    with TestClient(main.app) as c:
+        yield c
 
 
 def test_routes_by_prefix(client):
@@ -46,3 +47,10 @@ def test_forwards_idempotency_key_and_query(client):
     body = client.post("/api/orders", json={}, headers={"Idempotency-Key": "k1"}).json()
     assert body["idem"] == "k1"
     assert client.get("/api/events?after=5").json()["query"] == "after=5"
+
+
+def test_chaos_routes_to_service(client, monkeypatch):
+    monkeypatch.setitem(main.CHAOS_TARGETS, "payment", "http://payment")
+    body = client.put("/api/chaos/payment", json={"fail_rate": 1}).json()
+    assert body["host"] == "payment" and body["path"] == "/chaos"
+    assert client.get("/api/chaos/nope").status_code == 404

@@ -40,6 +40,8 @@ class EventBus:
         self.source = source
         # Tests replace this to capture messages instead of POSTing to the broker.
         self.sender = self._post_to_broker
+        # Reused: creating an httpx client costs ~130 ms (it loads the CA bundle).
+        self._http: httpx.Client | None = None
 
         class OutboxEvent(Base):
             __tablename__ = "outbox"
@@ -107,7 +109,9 @@ class EventBus:
         # Same REST shape as Google Pub/Sub's topics.publish.
         url = f"{BROKER_URL}/v1/projects/{PROJECT}/topics/{topic}:publish"
         message = {"data": base64.b64encode(body.encode()).decode(), "attributes": {"type": topic}}
-        httpx.post(url, json={"messages": [message]}, timeout=3.0).raise_for_status()
+        if self._http is None:
+            self._http = httpx.Client(timeout=3.0)
+        self._http.post(url, json={"messages": [message]}).raise_for_status()
 
     # --- consuming --------------------------------------------------------
 

@@ -24,12 +24,15 @@ SUBSCRIPTIONS = ",".join([
     f"payment.failed={URL['order']}{PUSH}",
     f"order.completed={URL['notification']}{PUSH}",
     f"order.cancelled={URL['notification']}{PUSH}",
+    # saga compensation (ADR 0004)
+    f"order.cancelled={URL['catalog']}{PUSH}",
+    f"order.cancelled={URL['payment']}{PUSH}",
 ])
 
 
 def main() -> None:
     env = {**os.environ, "PYTHONPATH": str(ROOT), "PYTHONUNBUFFERED": "1", "BROKER_URL": URL["broker"],
-           "CATALOG_URL": URL["catalog"], "ORDER_URL": URL["order"],
+           "CATALOG_URL": URL["catalog"], "ORDER_URL": URL["order"], "PAYMENT_URL": URL["payment"],
            "NOTIFICATION_URL": URL["notification"], "SUBSCRIPTIONS": SUBSCRIPTIONS,
            "DUPLICATE_RATE": "1" if "--dupes" in sys.argv else "0"}
     procs = [

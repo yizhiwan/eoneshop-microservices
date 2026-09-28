@@ -1,18 +1,28 @@
-"""order-svc: owns orders.
+"""order-svc: owns orders, and is the source of truth for how each one ends.
 
-POST /orders now only records a PENDING order and emits order.created (via the
-outbox) and answers 202 straight away. The final status arrives later as events
-from catalog and payment. Clients poll GET /orders/{id}.
+POST /orders records a PENDING order, emits order.created (via the outbox) and
+answers 202 straight away. The final status arrives later as events from
+catalog and payment. Clients poll GET /orders/{id}.
+
+Saga (choreography, ADR 0004): every way an order can fail ends in ONE event,
+order.cancelled. Catalog and payment undo their own step when they hear it.
+A sweeper cancels orders stuck in PENDING, e.g. because a service is down and
+its events were dead-lettered.
 """
+import os
+import threading
+import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import Integer, String, select
+from sqlalchemy import DateTime, Integer, String, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
+from shared.chaos import Chaos
 from shared.eventbus import EventBus, parse_push
 
 from .db import Base, SessionLocal, engine, get_db
@@ -27,19 +37,53 @@ class Order(Base):
     total_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(20))
     reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
+
+ORDER_TIMEOUT_S = float(os.getenv("ORDER_TIMEOUT_S", "15"))
 
 bus = EventBus(Base, SessionLocal, source="order")
+chaos = Chaos()
+
+
+def sweep_once(now: datetime | None = None) -> int:
+    """Cancel orders that have been PENDING longer than ORDER_TIMEOUT_S."""
+    cutoff = (now or datetime.now(timezone.utc)) - timedelta(seconds=ORDER_TIMEOUT_S)
+    with SessionLocal() as db:
+        stuck = db.scalars(select(Order).where(Order.status == "PENDING")).all()
+        # SQLite hands back naive datetimes; treat them as UTC.
+        stuck = [o for o in stuck if o.created_at.replace(tzinfo=timezone.utc) < cutoff]
+        for order in stuck:
+            _finish(db, order.ref, "CANCELLED", "timeout")
+        db.commit()
+        return len(stuck)
+
+
+def start_sweeper(interval: float = 1.0) -> None:
+    if os.getenv("SAGA_SWEEPER", "on") == "off":
+        return
+
+    def loop():
+        while True:
+            try:
+                sweep_once()
+            except Exception as e:
+                print(f"[order] sweeper tick failed: {e}")
+            time.sleep(interval)
+
+    threading.Thread(target=loop, daemon=True, name="saga-sweeper").start()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(engine)
     bus.start_relay()
+    start_sweeper()
     yield
 
 
 app = FastAPI(title="order-svc", lifespan=lifespan)
+app.include_router(chaos.router)
 
 
 class OrderIn(BaseModel):
@@ -104,13 +148,13 @@ def _finish(db: Session, ref: str, status: str, reason: str | None = None, total
 HANDLERS = {
     "stock.rejected": lambda db, d: _finish(db, d["order_ref"], "CANCELLED", d["reason"]),
     "payment.succeeded": lambda db, d: _finish(db, d["order_ref"], "COMPLETED", total=d["amount_cents"]),
-    # Known gap until Phase 4: the reserved stock is NOT released here.
     "payment.failed": lambda db, d: _finish(db, d["order_ref"], "CANCELLED", "payment_declined", d["amount_cents"]),
 }
 
 
 @app.post("/pubsub/push", status_code=204)
 def push(envelope: dict, db: Session = Depends(get_db)):
+    chaos.disrupt()
     event = parse_push(envelope)
     handler = HANDLERS.get(event.type)
     if handler and bus.first_time(db, event):

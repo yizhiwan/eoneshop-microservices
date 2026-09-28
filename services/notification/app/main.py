@@ -11,6 +11,7 @@ from sqlalchemy import DateTime, String, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
+from shared.chaos import Chaos
 from shared.eventbus import EventBus, parse_push
 
 from .db import Base, SessionLocal, engine, get_db
@@ -25,6 +26,7 @@ class Notification(Base):
 
 
 bus = EventBus(Base, SessionLocal, source="notification")
+chaos = Chaos()
 
 
 @asynccontextmanager
@@ -34,6 +36,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="notification-svc", lifespan=lifespan)
+app.include_router(chaos.router)
 
 
 @app.get("/health")
@@ -61,6 +64,7 @@ HANDLERS = {"order.completed": on_order_finished, "order.cancelled": on_order_fi
 
 @app.post("/pubsub/push", status_code=204)
 def push(envelope: dict, db: Session = Depends(get_db)):
+    chaos.disrupt()
     event = parse_push(envelope)
     handler = HANDLERS.get(event.type)
     if handler and bus.first_time(db, event):
