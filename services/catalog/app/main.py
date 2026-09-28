@@ -8,11 +8,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
 from sqlalchemy import Integer, String
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from shared.chaos import Chaos
-from shared.eventbus import EventBus, parse_push
+from shared import telemetry
+from shared.eventbus import EventBus
 
 from .db import Base, SessionLocal, engine, get_db
 
@@ -44,6 +44,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="catalog-svc", lifespan=lifespan)
 app.include_router(chaos.router)
+telemetry.setup("catalog", app)
 
 
 def _out(p: Product) -> dict:
@@ -107,13 +108,4 @@ HANDLERS = {"order.created": on_order_created, "order.cancelled": on_order_cance
 
 @app.post("/pubsub/push", status_code=204)
 def push(envelope: dict, db: Session = Depends(get_db)):
-    chaos.disrupt()
-    event = parse_push(envelope)
-    handler = HANDLERS.get(event.type)
-    if handler and bus.first_time(db, event):
-        handler(db, event.data)
-    try:
-        db.commit()
-    except IntegrityError:
-        # A concurrent copy of the same event won the race to processed_events.
-        db.rollback()
+    bus.handle_push(db, envelope, HANDLERS, before=chaos.disrupt)

@@ -8,11 +8,11 @@ from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI
 from sqlalchemy import DateTime, String, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from shared.chaos import Chaos
-from shared.eventbus import EventBus, parse_push
+from shared import telemetry
+from shared.eventbus import EventBus
 
 from .db import Base, SessionLocal, engine, get_db
 
@@ -24,6 +24,9 @@ class Notification(Base):
     message: Mapped[str] = mapped_column(String(200))
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
+
+# Stand-in for an email provider: things that can't be rolled back.
+OUTBOX_OF_THE_WORLD: list[str] = []
 
 bus = EventBus(Base, SessionLocal, source="notification")
 chaos = Chaos()
@@ -37,6 +40,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="notification-svc", lifespan=lifespan)
 app.include_router(chaos.router)
+telemetry.setup("notification", app)
 
 
 @app.get("/health")
@@ -56,7 +60,8 @@ def on_order_finished(db: Session, d: dict) -> None:
     else:
         message = f"Sorry, your order was cancelled ({d['reason']})."
     db.add(Notification(order_ref=d["order_ref"], message=message))
-    print(f"[notification] email for {d['order_ref']}: {message}")
+    OUTBOX_OF_THE_WORLD.append(d["order_ref"])
+    telemetry.log("email sent", order_ref=d["order_ref"], text=message)
 
 
 HANDLERS = {"order.completed": on_order_finished, "order.cancelled": on_order_finished}
@@ -64,13 +69,4 @@ HANDLERS = {"order.completed": on_order_finished, "order.cancelled": on_order_fi
 
 @app.post("/pubsub/push", status_code=204)
 def push(envelope: dict, db: Session = Depends(get_db)):
-    chaos.disrupt()
-    event = parse_push(envelope)
-    handler = HANDLERS.get(event.type)
-    if handler and bus.first_time(db, event):
-        handler(db, event.data)
-    try:
-        db.commit()
-    except IntegrityError:
-        # A concurrent copy of the same event won the race to processed_events.
-        db.rollback()
+    bus.handle_push(db, envelope, HANDLERS, before=chaos.disrupt)

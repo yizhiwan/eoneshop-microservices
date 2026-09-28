@@ -4,6 +4,8 @@
 x-service: &service
   environment: &env
     BROKER_URL: http://broker:8080
+    OTEL_EXPORTER_OTLP_ENDPOINT: http://traces:8080
+    OTEL_BSP_SCHEDULE_DELAY: "500"
 services:
   gateway:
     build: { context: ., dockerfile: services/gateway/Dockerfile }
@@ -14,6 +16,8 @@ services:
       PAYMENT_URL: http://payment:8080
       NOTIFICATION_URL: http://notification:8080
       BROKER_URL: http://broker:8080
+      TRACES_URL: http://traces:8080
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://traces:8080
   broker:
     build: { context: ., dockerfile: services/broker/Dockerfile }
     environment:
@@ -29,6 +33,8 @@ services:
         order.cancelled=http://notification:8080/pubsub/push,
         order.cancelled=http://catalog:8080/pubsub/push,
         order.cancelled=http://payment:8080/pubsub/push
+  traces:
+    build: { context: ., dockerfile: services/traces/Dockerfile }
   catalog:
     <<: *service
     build: { context: ., dockerfile: services/catalog/Dockerfile }

@@ -9,7 +9,7 @@ microservices on Cloud Run. Live demo (coming): https://micro.eonelabs.my
 | 2 | Split into services + API gateway | ✅ |
 | 3 | Async events (Pub/Sub), idempotency, outbox | ✅ |
 | 4 | Saga + compensation, chaos toggle | ✅ |
-| 5 | Observability (OpenTelemetry, Cloud Trace) | |
+| 5 | Observability (OpenTelemetry, Cloud Trace) | ✅ |
 | 6 | Deploy to Cloud Run | |
 | 7 | Live event-flow visualizer | |
 
@@ -28,7 +28,7 @@ Orders totalling RM100+ fail payment on purpose and roll back stock.
 ## Run the services
 
 ```bash
-python scripts/dev.py            # all 6 services, no Docker; gateway on http://127.0.0.1:8080
+python scripts/dev.py            # all 7 services, no Docker; gateway on http://127.0.0.1:8080
 python scripts/dev.py --dupes    # broker delivers every message twice
 docker compose up --build        # same thing in containers
 ```
@@ -72,3 +72,26 @@ python scripts/saga_demo.py
 ```
 
 Decisions are logged in [docs/adr](docs/adr).
+
+## Follow one order (Phase 5)
+
+Every order is one trace across all services, including through the outbox
+and the broker. Retries show as errors and duplicates are tagged.
+
+```bash
+curl 127.0.0.1:8080/api/traces/by-order/my-first-order        # -> trace_id
+curl 127.0.0.1:8080/api/traces/<trace_id>/waterfall
+```
+
+```
+trace c967525d...  order trace-demo-flaky
+    27.7ms     1.4ms █              order         publish order.created
+    30.4ms     1.7ms █              catalog         process order.created  ✗
+   548.5ms     1.3ms  █             catalog         process order.created  ✗
+  1560.6ms    10.4ms    █           catalog         process order.created
+  1654.8ms     1.8ms    █           catalog           publish stock.reserved
+  1657.8ms     9.1ms    █           payment           process stock.reserved
+  ...
+```
+
+Logs are JSON lines carrying `trace_id` (Cloud Logging format).

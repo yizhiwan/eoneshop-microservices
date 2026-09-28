@@ -9,6 +9,7 @@ order.cancelled. Catalog and payment undo their own step when they hear it.
 A sweeper cancels orders stuck in PENDING, e.g. because a service is down and
 its events were dead-lettered.
 """
+import json
 import os
 import threading
 import time
@@ -17,13 +18,15 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
+from opentelemetry import trace
 from pydantic import BaseModel, Field
 from sqlalchemy import DateTime, Integer, String, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from shared.chaos import Chaos
-from shared.eventbus import EventBus, parse_push
+from shared import telemetry
+from shared.eventbus import EventBus
 
 from .db import Base, SessionLocal, engine, get_db
 
@@ -38,6 +41,9 @@ class Order(Base):
     status: Mapped[str] = mapped_column(String(20))
     reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # Trace context of the request that created the order, so work done later
+    # without a request (the timeout sweeper) still joins the same trace.
+    trace_ctx: Mapped[str] = mapped_column(String(200), default="{}")
 
 
 ORDER_TIMEOUT_S = float(os.getenv("ORDER_TIMEOUT_S", "15"))
@@ -54,7 +60,12 @@ def sweep_once(now: datetime | None = None) -> int:
         # SQLite hands back naive datetimes; treat them as UTC.
         stuck = [o for o in stuck if o.created_at.replace(tzinfo=timezone.utc) < cutoff]
         for order in stuck:
-            _finish(db, order.ref, "CANCELLED", "timeout")
+            with telemetry.tracer().start_as_current_span(
+                "saga timeout", context=telemetry.context_from(json.loads(order.trace_ctx)),
+                attributes={"order.ref": order.ref, "order.timeout_s": ORDER_TIMEOUT_S},
+            ):
+                _finish(db, order.ref, "CANCELLED", "timeout")
+                telemetry.log("order timed out", severity="WARNING", order_ref=order.ref)
         db.commit()
         return len(stuck)
 
@@ -68,7 +79,7 @@ def start_sweeper(interval: float = 1.0) -> None:
             try:
                 sweep_once()
             except Exception as e:
-                print(f"[order] sweeper tick failed: {e}")
+                telemetry.log("sweeper tick failed", severity="ERROR", error=str(e))
             time.sleep(interval)
 
     threading.Thread(target=loop, daemon=True, name="saga-sweeper").start()
@@ -84,6 +95,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="order-svc", lifespan=lifespan)
 app.include_router(chaos.router)
+telemetry.setup("order", app)
 
 
 class OrderIn(BaseModel):
@@ -115,7 +127,9 @@ def place_order(body: OrderIn, response: Response, db: Session = Depends(get_db)
         return _out(existing)
 
     ref = idempotency_key or str(uuid.uuid4())
-    order = Order(ref=ref, product_id=body.product_id, qty=body.qty, status="PENDING")
+    trace.get_current_span().set_attribute("order.ref", ref)
+    order = Order(ref=ref, product_id=body.product_id, qty=body.qty, status="PENDING",
+                  trace_ctx=json.dumps(telemetry.current_carrier()))
     db.add(order)
     bus.add(db, "order.created", {"order_ref": ref, "product_id": body.product_id, "qty": body.qty})
     try:
@@ -142,6 +156,8 @@ def _finish(db: Session, ref: str, status: str, reason: str | None = None, total
     order.status, order.reason = status, reason
     if total is not None:
         order.total_cents = total
+    trace.get_current_span().set_attribute("order.status", status)
+    telemetry.log(f"order {status.lower()}", order_ref=ref, reason=reason)
     bus.add(db, f"order.{status.lower()}", {"order_ref": ref, "status": status, "reason": reason})
 
 
@@ -154,13 +170,4 @@ HANDLERS = {
 
 @app.post("/pubsub/push", status_code=204)
 def push(envelope: dict, db: Session = Depends(get_db)):
-    chaos.disrupt()
-    event = parse_push(envelope)
-    handler = HANDLERS.get(event.type)
-    if handler and bus.first_time(db, event):
-        handler(db, event.data)
-    try:
-        db.commit()
-    except IntegrityError:
-        # A concurrent copy of the same event won the race to processed_events.
-        db.rollback()
+    bus.handle_push(db, envelope, HANDLERS, before=chaos.disrupt)

@@ -7,6 +7,8 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, Request, Response
 
+from shared import telemetry
+
 CATALOG_URL = os.getenv("CATALOG_URL", "http://127.0.0.1:8001")
 ORDER_URL = os.getenv("ORDER_URL", "http://127.0.0.1:8002")
 PAYMENT_URL = os.getenv("PAYMENT_URL", "http://127.0.0.1:8003")
@@ -18,6 +20,8 @@ ROUTES = {
     "notifications": NOTIFICATION_URL,
     # Broker delivery log, read by the Phase 7 visualizer.
     "events": os.getenv("BROKER_URL", "http://127.0.0.1:8085"),
+    # Local trace collector (ADR 0005).
+    "traces": os.getenv("TRACES_URL", "http://127.0.0.1:8086"),
 }
 # /api/chaos/<name> -> that service's /chaos (fault injection, ADR 0004).
 CHAOS_TARGETS = {"catalog": CATALOG_URL, "order": ORDER_URL,
@@ -42,6 +46,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="gateway", lifespan=lifespan)
+telemetry.setup("gateway", app)
 
 
 @app.get("/health")
