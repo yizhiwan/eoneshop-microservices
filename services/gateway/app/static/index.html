@@ -253,10 +253,18 @@ async function placeOrder() {
   const flushFinal = () => { if (finalLine) { addLine(...finalLine); finalLine = null; } };
   const deadline = performance.now() + 90_000;
   while (performance.now() < deadline) {
-    const [o, events] = await Promise.all([
-      fetch(`${API}/orders/${order.id}`).then((x) => x.json()),  // also triggers the lazy timeout sweep
+    const [orderRes, events] = await Promise.all([
+      fetch(`${API}/orders/${order.id}`),  // also triggers the lazy timeout sweep
       fetch(`${API}/feed?order=${encodeURIComponent(order.ref)}&after=${after}`).then((x) => x.ok ? x.json() : []),
     ]);
+    if (!orderRes.ok) {
+      // Rate limited (429) or a hiccup: back off instead of breaking the view.
+      const wait = Number(orderRes.headers.get("retry-after")) || 2;
+      $("status").textContent = `Busy, retrying in ${wait}s…`;
+      await sleep(wait * 1000);
+      continue;
+    }
+    const o = await orderRes.json();
     events.sort((a, b) => Date.parse(a.occurred_at) - Date.parse(b.occurred_at));
     for (const ev of events) {
       after = Math.max(after, ev.seq);
