@@ -1,0 +1,34 @@
+TITLE: Learning Microservices in Public, Part 1: Why I Started With a Monolith
+TAGS: microservices, architecture, fastapi, learning-in-public
+
+I want to properly learn microservices, not just read about them. So I'm building a small online shop called EoneShop, step by step, and writing down what I learn at each stage. The code is public: github.com/yizhiwan/eoneshop-microservices
+
+The plan has seven phases: a monolith first, then splitting it into services behind an API gateway, then async events with Pub/Sub, then a saga to handle failures, then tracing, then deploying to Cloud Run, and finally a live page at micro.eonelabs.my where you can place an order and watch the events travel between services.
+
+This post is about phase one, and why it deliberately isn't microservices at all.
+
+Why not go straight to microservices?
+
+The hardest part of microservices isn't Docker or Kubernetes. It's deciding where one service ends and the next begins. Draw those lines wrong and you end up with services that have to call each other for every request, share a database anyway, and deploy together. That's a distributed monolith: all the pain of a network, none of the independence.
+
+You can only draw good lines once you understand the domain. So I started with one FastAPI app, split into three modules that I expect to become services later:
+
+1. catalog: products and stock
+2. orders: taking and tracking orders
+3. payment: a fake payment provider
+
+The modules only talk to each other through a few plain function calls: reserve_stock, release_stock and charge. Later those calls turn into HTTP requests or events. If a module needed to reach deep into another module's tables, that would be an early warning that the boundary was in the wrong place.
+
+The thing I'll lose: one transaction
+
+Here's what placing an order looks like in the monolith. Reserve the stock, charge the payment, and save the order, all inside one database transaction. If the payment fails, the stock goes back and the order is marked CANCELLED. The database guarantees it's all or nothing.
+
+To test that path I made the fake payment fail on purpose for any order of RM100 or more. Three Batik Mugs at RM35 each and the order is cancelled, and the stock count stays at 10.
+
+That guarantee is exactly what disappears once catalog, orders and payment each have their own database. There's no single transaction across three services. Phase four rebuilds it with a pattern called a saga, where every step has a matching "undo" step. Having the monolith version first gives me something to compare against.
+
+What I have so far
+
+A FastAPI app with SQLAlchemy and SQLite, four pytest tests (happy path, payment failure with stock rollback, out of stock, fetching an order), a GitHub Actions workflow, and my first Architecture Decision Record, a short note explaining why I made this choice. I'll keep writing ADRs for every big decision. Future me will be glad of them.
+
+Next up: phase two. I split catalog and orders into separate services, put a gateway in front, and find out what happens when a function call becomes a network call that can be slow or fail.
