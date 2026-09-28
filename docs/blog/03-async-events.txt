@@ -54,7 +54,7 @@ Bug 2: orders stuck at PENDING, with no errors anywhere
 
 Orders sat at PENDING for many seconds. No errors in any log. When I inspected the outbox, one event had been published 2.4 seconds after it was created, even though the relay runs every 0.2 seconds.
 
-The cause had nothing to do with microservices. On Windows, "localhost" is tried as IPv6 first. My services only listened on IPv4, so every connection waited about 2 seconds before falling back. Seven hops per order, about 2 seconds each: 14 seconds of nothing. Switching every local URL to 127.0.0.1 took an order from over 14 seconds to under 1.
+The cause had nothing to do with microservices. On Windows, "localhost" is tried as IPv6 first. My services only listened on IPv4, so every connection waited about 2 seconds before falling back. Seven hops per order, about 2 seconds each: 14 seconds of nothing. Switching every local URL to 127.0.0.1 took an order from over 14 seconds to about 2.5. (I first wrote "under 1 second" here. My stopwatch was broken, and Part 4 found where the other 2 seconds were going.)
 
 That also explained Part 2. Most of the "9 seconds of retries" that broke my timeout budget was this same 2 second penalty, paid again on every attempt.
 
