@@ -18,7 +18,7 @@ No service knows who is listening. Order doesn't call payment any more. It doesn
 
 A small broker instead of an emulator
 
-In production this will run on Google Pub/Sub. Locally I wrote a tiny stand-in called pubsub-lite: about 150 lines that use the same API shape as Pub/Sub, so the services won't change when I switch.
+In production this will run on Google Pub/Sub. Locally I wrote a tiny stand-in called pubsub-lite: about 120 lines that use the same API shape as Pub/Sub, so the services won't change when I switch.
 
 More importantly, I copied Pub/Sub's promises, including the uncomfortable ones. A message is delivered at least once, so sometimes more than once. A failed delivery is retried with growing delays, and after five failures it goes to a dead-letter list. There's no guarantee about order. There's also a switch that delivers every single message twice, so I could test the worst case on purpose.
 
