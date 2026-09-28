@@ -1,0 +1,63 @@
+TITLE: Learning Microservices in Public, Part 6: Leaving the Laptop
+TAGS: microservices, cloud-run, pubsub, serverless, learning-in-public
+
+For five parts, EoneShop lived on my laptop: seven Python processes, a homemade broker and a homemade trace collector. This part is about moving it to Google Cloud for real, and about the one feature of serverless hosting that broke two things I thought were finished.
+
+Code: github.com/yizhiwan/eoneshop-microservices
+
+What production looks like
+
+1. Five services on Cloud Run: gateway, catalog, order, payment and notification. They scale to zero when nobody is using them, so an idle shop costs nothing.
+2. Google Pub/Sub instead of my little broker.
+3. Neon Postgres, one database per service.
+4. Cloud Trace and Cloud Logging instead of my text waterfall.
+
+Swapping the broker was the easy part, because of a decision from Part 3. My broker already spoke Pub/Sub's API and delivered messages in Pub/Sub's format. The services didn't need to change, only the address they publish to, plus a login token. Pub/Sub keeps the promises I'd copied: a failed delivery is retried with growing delays (from 1 second up to 60), and after five failures the message goes to a dead-letter topic.
+
+Why not SQLite?
+
+The cheapest option was to keep SQLite inside each container. It would have cost nothing and needed no setup. But Cloud Run throws containers away whenever it likes, and that would quietly break the guarantees I spent three parts building.
+
+The outbox would lose events that hadn't been sent yet. The "already handled this event" records would vanish, so a redelivered event would be processed again, which could mean a second charge or a second email. The tombstones from Part 4 would disappear too. And each service's data would reset at a different moment, so an order could survive while its stock reservation didn't.
+
+So production uses Postgres on Neon's free tier: one project, four databases, one per service. Local development stays on SQLite because it's fast and needs nothing installed. To make sure the two don't behave differently, CI now runs the full test suite of every database-owning service against a real Postgres as well. That includes the four-thread race test from Part 5. All green on the first run.
+
+Private by default
+
+Only the gateway is public. The other four services refuse anyone who can't prove who they are. The gateway proves it with an ID token: a short-lived signed note from Google saying "this request comes from the gateway's service account". Pub/Sub does the same when it delivers events. Cloud Run checks the token before my code even runs, so there are no passwords or shared secrets anywhere.
+
+Each service also runs as its own identity with only the permissions it needs. Catalog can publish catalog events and read catalog's database password, and nothing else. If catalog were compromised, it still couldn't announce payment.succeeded.
+
+The trap: Cloud Run pauses your CPU
+
+Here's the thing I didn't know. By default, Cloud Run only gives a container CPU while it's handling a request. Once the response is sent, the container is frozen until the next request arrives. You pay only for the time you use, which is great. But any background thread just stops.
+
+My outbox relay was a background thread. So was the timeout sweeper from Part 4. So was, as I found out later, the thread that sends traces.
+
+For the outbox, the fix was to publish right after each commit, while the request still has CPU. The background thread stays as a backup. Because several copies of a service can now run at once, the relay also locks the rows it takes, so two copies never publish the same event.
+
+For the timeout sweeper, the obvious fix was a scheduler that pokes order-svc every minute. I didn't do it, because Neon suspends a database after five idle minutes, and a poke every minute would keep it awake around the clock and use up the free compute hours. So timeouts are now lazy: overdue orders are cancelled whenever someone places or looks at an order. A timeout only matters when somebody is looking, and then it gets handled.
+
+The first real order
+
+The first three orders through the live system did exactly what they did on my laptop. One completed. One was declined, and its stock came back through the saga. One was out of stock. Each customer got exactly one email, and retrying with the same idempotency key returned the same order. That took 11 seconds, because five services and four databases were all waking from zero at once.
+
+Then I opened Cloud Trace to admire it, and it was empty.
+
+The logs showed trace IDs, and the same ID appeared in order-svc and notification-svc for the same order, so the trace context was travelling through Pub/Sub correctly. But not a single span had reached Cloud Trace.
+
+It was the CPU again. OpenTelemetry collects finished spans and sends them in batches from a background thread, a few seconds later. On Cloud Run, a few seconds later the container is frozen. The spans just sat in memory.
+
+The fix: hold back the very last byte of each response, send the spans, then release the byte. It has to happen outside OpenTelemetry's own wrapper, or the request's outermost span wouldn't be finished yet and would be left behind. I wrote a test that only passes if the spans are exported before the client gets its response. It failed without the fix and passed with it.
+
+The next order showed up as one trace of 27 spans: gateway, order, Pub/Sub, catalog, payment, back to order, then the cancellation fanning out to three services and the stock being released. Pub/Sub adds about 0.7 seconds per hop. The whole saga takes about 3.6 seconds.
+
+Shipping
+
+The whole thing deploys itself. Merging to the main branch runs a Cloud Build pipeline that works out which services actually changed (their own folder, or the shared code), builds only those, and deploys them. The trace fix was the first thing to go out that way.
+
+What I'd tell myself
+
+"Serverless" changes what your code can assume. A background thread is a completely normal thing on a server, and on Cloud Run it's a thread that might never run. Three separate features of mine depended on one: the outbox, the timeout sweeper and trace export. None of it showed up locally, and none of it showed up in the tests. It showed up when I looked for proof in production.
+
+Next, the last part: a live page where you can place an order and watch the events move between the services yourself.
