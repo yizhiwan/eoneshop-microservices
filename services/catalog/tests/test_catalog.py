@@ -100,3 +100,25 @@ def test_chaos_fails_pushes(client):
     finally:
         chaos.reset()
     assert client.put("/chaos", json={"bogus": 1}).status_code == 422
+
+
+def test_publishes_to_real_pubsub_with_token(client, monkeypatch):
+    """Production path: Google Pub/Sub REST, prefixed topic, bearer token."""
+    import httpx
+
+    from shared import eventbus
+
+    seen = []
+    monkeypatch.setattr(eventbus, "PUBSUB_ENDPOINT", "https://pubsub.googleapis.com")
+    monkeypatch.setattr(eventbus, "PROJECT", "eonelabs-portfolio")
+    monkeypatch.setattr(eventbus, "TOPIC_PREFIX", "eoneshop.")
+    monkeypatch.setattr(eventbus.gcp, "access_token", lambda: "tok")
+    monkeypatch.setattr(bus, "sender", bus._post_to_broker)
+    monkeypatch.setattr(bus, "_http", httpx.Client(transport=httpx.MockTransport(
+        lambda r: seen.append(r) or httpx.Response(200, json={"messageIds": ["1"]}))))
+    client.post("/pubsub/push", json=order_created("p1", 1, 1))
+    assert bus.relay_once() == 1
+    [req] = seen
+    assert str(req.url) == ("https://pubsub.googleapis.com/v1/projects/eonelabs-portfolio/"
+                            "topics/eoneshop.stock.reserved:publish")
+    assert req.headers["authorization"] == "Bearer tok"

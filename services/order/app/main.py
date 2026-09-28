@@ -112,6 +112,16 @@ def _by_ref(db: Session, ref: str) -> Order | None:
     return db.scalar(select(Order).where(Order.ref == ref))
 
 
+@app.post("/internal/tick")
+def tick():
+    """Cloud Scheduler calls this every minute (ADR 0006). On Cloud Run the
+    background threads get no CPU between requests, so this is what really
+    sweeps timed-out orders and flushes a stuck outbox in production."""
+    swept = sweep_once()
+    published = bus.relay_once()
+    return {"swept": swept, "published": published}
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -138,6 +148,7 @@ def place_order(body: OrderIn, response: Response, db: Session = Depends(get_db)
         db.rollback()
         response.status_code = 200
         return _out(_by_ref(db, ref))
+    bus.relay_after_commit()
     return _out(order)
 
 

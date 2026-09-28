@@ -1,24 +1,3 @@
-import os
+from shared.db import make_database
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import DeclarativeBase, sessionmaker
-
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./catalog.db")
-
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {},
-)
-SessionLocal = sessionmaker(bind=engine, autoflush=False)
-
-
-class Base(DeclarativeBase):
-    pass
-
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+Base, engine, SessionLocal, get_db = make_database("sqlite:///./catalog.db")

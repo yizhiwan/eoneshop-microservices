@@ -11,12 +11,14 @@ def handler(request: httpx.Request) -> httpx.Response:
     return httpx.Response(200, json={"host": request.url.host, "path": request.url.path,
                                      "query": str(request.url.query, "ascii"),
                                      "rid": request.headers["x-request-id"],
-                                     "idem": request.headers.get("idempotency-key")})
+                                     "idem": request.headers.get("idempotency-key"),
+                                     "auth": request.headers.get("authorization")})
 
 
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setattr(main, "transport", httpx.MockTransport(handler))
+    monkeypatch.setattr(main, "_writes", {})
     monkeypatch.setitem(main.ROUTES, "products", "http://catalog")
     monkeypatch.setitem(main.ROUTES, "orders", "http://order")
     with TestClient(main.app) as c:
@@ -54,3 +56,30 @@ def test_chaos_routes_to_service(client, monkeypatch):
     body = client.put("/api/chaos/payment", json={"fail_rate": 1}).json()
     assert body["host"] == "payment" and body["path"] == "/chaos"
     assert client.get("/api/chaos/nope").status_code == 404
+
+
+def test_signs_upstream_calls_on_cloud_run(client, monkeypatch):
+    monkeypatch.setattr(main.gcp, "on_cloud_run", lambda: True)
+    audiences = []
+    monkeypatch.setattr(main.gcp, "id_token", lambda aud: audiences.append(aud) or "tok")
+    assert client.get("/api/orders/1").json()["auth"] == "Bearer tok"
+    assert audiences == ["http://order"]  # audience = the target service's URL
+
+
+def test_no_token_locally(client):
+    assert client.get("/api/orders/1").json()["auth"] is None
+
+
+def test_rate_limits_writes_per_ip(client, monkeypatch):
+    monkeypatch.setattr(main, "WRITES_PER_MINUTE", 3)
+    ip = {"x-forwarded-for": "203.0.113.7, 10.0.0.1"}
+    codes = [client.post("/api/orders", json={}, headers=ip).status_code for _ in range(4)]
+    assert codes == [200, 200, 200, 429]
+    assert client.get("/api/orders/1", headers=ip).status_code == 200  # reads aren't limited
+    other = {"x-forwarded-for": "198.51.100.9"}
+    assert client.post("/api/orders", json={}, headers=other).status_code == 200
+
+
+def test_chaos_can_be_switched_off(client, monkeypatch):
+    monkeypatch.setattr(main, "CHAOS_ENABLED", False)
+    assert client.get("/api/chaos/payment").status_code == 404

@@ -20,10 +20,18 @@ from sqlalchemy import DateTime, String, Text, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
-from . import telemetry
+from . import gcp, telemetry
 
-BROKER_URL = os.getenv("BROKER_URL", "http://127.0.0.1:8085")
+# pubsub-lite locally; https://pubsub.googleapis.com in production (ADR 0006).
+# Both speak the same publish API, so only the URL and auth differ.
+PUBSUB_ENDPOINT = os.getenv("PUBSUB_ENDPOINT", os.getenv("BROKER_URL", "http://127.0.0.1:8085"))
 PROJECT = os.getenv("PUBSUB_PROJECT", "eoneshop-local")
+# Topics share a GCP project with other apps, so prod prefixes them ("eoneshop.").
+TOPIC_PREFIX = os.getenv("TOPIC_PREFIX", "")
+# On Cloud Run, CPU is throttled between requests, so a background thread can't
+# be relied on to publish. RELAY_INLINE=on publishes right after each commit,
+# while the request still has CPU; the thread and /internal/tick are the backup.
+RELAY_INLINE = os.getenv("RELAY_INLINE", "off") == "on"
 
 
 def _now() -> datetime:
@@ -86,9 +94,14 @@ class EventBus:
         event_id, and consumers drop the duplicate."""
         sent = 0
         with self.SessionLocal() as db:
+            # Postgres: lock the rows we take and skip rows another relayer has
+            # locked, so two instances never publish the same row. SQLite has
+            # no row locks (SQLAlchemy drops the clause), and doesn't need them
+            # with one writer at a time.
             rows = db.scalars(
                 select(self.Outbox).where(self.Outbox.published_at.is_(None))
                 .order_by(self.Outbox.created_at).limit(50)
+                .with_for_update(skip_locked=True)
             ).all()
             for row in rows:
                 body = json.loads(row.body)
@@ -108,9 +121,17 @@ class EventBus:
                                       topic=row.topic, error=str(e))
                         break
                 row.published_at = _now()
-                db.commit()
                 sent += 1
+            db.commit()  # one commit, so the row locks are held until we're done
         return sent
+
+    def relay_after_commit(self) -> None:
+        """Call right after committing a transaction that staged events."""
+        if RELAY_INLINE:
+            try:
+                self.relay_once()
+            except Exception as e:  # the backup paths will retry
+                telemetry.log("inline relay failed", severity="WARNING", error=str(e))
 
     def start_relay(self, interval: float = 0.2) -> None:
         if os.getenv("OUTBOX_RELAY", "on") == "off":
@@ -129,12 +150,15 @@ class EventBus:
         threading.Thread(target=loop, daemon=True, name="outbox-relay").start()
 
     def _post_to_broker(self, topic: str, body: str) -> None:
-        # Same REST shape as Google Pub/Sub's topics.publish.
-        url = f"{BROKER_URL}/v1/projects/{PROJECT}/topics/{topic}:publish"
+        # Google Pub/Sub's topics.publish REST call (pubsub-lite copies it).
+        url = f"{PUBSUB_ENDPOINT}/v1/projects/{PROJECT}/topics/{TOPIC_PREFIX}{topic}:publish"
         message = {"data": base64.b64encode(body.encode()).decode(), "attributes": {"type": topic}}
+        headers = {}
+        if PUBSUB_ENDPOINT.startswith("https://pubsub.googleapis.com"):
+            headers["Authorization"] = f"Bearer {gcp.access_token()}"
         if self._http is None:
             self._http = httpx.Client(timeout=3.0)
-        self._http.post(url, json={"messages": [message]}).raise_for_status()
+        self._http.post(url, json={"messages": [message]}, headers=headers).raise_for_status()
 
     # --- consuming --------------------------------------------------------
 
@@ -179,6 +203,7 @@ class EventBus:
                 return
             handler(db, event.data)
             db.commit()
+        self.relay_after_commit()
 
 
 def parse_push(envelope: dict) -> Event:
