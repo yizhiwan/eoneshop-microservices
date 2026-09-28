@@ -21,13 +21,18 @@ EXCLUDED_URLS = "health,pubsub/push,chaos"
 
 
 def setup(service: str, app=None) -> None:
-    """Call once per process, before handling requests. Exports only when
-    OTEL_EXPORTER_OTLP_ENDPOINT is set, so tests stay quiet."""
+    """Call once per process, before handling requests. Exports to Cloud Trace
+    when OTEL_TRACES_EXPORTER=gcp, to an OTLP collector when
+    OTEL_EXPORTER_OTLP_ENDPOINT is set, and nowhere otherwise (tests)."""
     global SERVICE, _provider
     SERVICE = service
     if _provider is None:
         _provider = TracerProvider(resource=Resource.create({"service.name": service}))
-        if os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"):
+        if os.getenv("OTEL_TRACES_EXPORTER") == "gcp":
+            # Production: Cloud Trace, authenticated as the service's own account.
+            from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
+            _provider.add_span_processor(BatchSpanProcessor(CloudTraceSpanExporter()))
+        elif os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"):
             from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
             _provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
         trace.set_tracer_provider(_provider)

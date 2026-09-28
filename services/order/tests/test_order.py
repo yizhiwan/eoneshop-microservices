@@ -112,3 +112,23 @@ def test_trace_follows_the_order_through_outbox_and_events(client):
     assert got["publish order.completed"] == trace_id
     process = next(s for s in spans.get_finished_spans() if s.name == "process payment.succeeded")
     assert process.attributes["order.ref"] == o["ref"]
+
+
+def test_internal_tick_sweeps_and_relays(client, monkeypatch):
+    from app import main as order_main
+    sent = []
+    bus.sender = lambda topic, body: sent.append(topic)
+    place(client)
+    monkeypatch.setattr(order_main, "ORDER_TIMEOUT_S", -1)  # everything is overdue
+    assert client.post("/internal/tick").json() == {"swept": 1, "published": 2}
+    assert sent == ["order.created", "order.cancelled"]
+
+
+def test_lazy_sweep_cancels_when_someone_looks(client, monkeypatch):
+    from app import main as order_main
+    monkeypatch.setattr(order_main, "LAZY_SWEEP", True)
+    o = place(client).json()
+    assert client.get(f"/orders/{o['id']}").json()["status"] == "PENDING"
+    monkeypatch.setattr(order_main, "ORDER_TIMEOUT_S", -1)
+    got = client.get(f"/orders/{o['id']}").json()
+    assert got["status"] == "CANCELLED" and got["reason"] == "timeout"

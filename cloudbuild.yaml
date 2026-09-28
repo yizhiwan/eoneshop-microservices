@@ -1,0 +1,91 @@
+# EoneShop on Cloud Run (ADR 0006). Runs on every merge to main.
+#
+# A service is rebuilt and redeployed only when services/<name>/ or shared/
+# changed since the revision that's live (a source-tree-hash label, the same
+# trick eonelabs uses). Three steps, because the SDK image has no docker and
+# the docker image has no gcloud: plan -> build -> deploy.
+#
+# One-time setup (service accounts, topics, secrets, subscriptions, domain)
+# lives in scripts/gcp_setup.sh, not here.
+#
+# Bash variables are lowercase so Cloud Build never mistakes them for
+# substitutions; $PROJECT_ID and $COMMIT_SHA are real substitutions.
+steps:
+  - id: plan
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        : > /workspace/deploy.txt
+        for svc in catalog order payment notification gateway; do
+          # Empty if git history isn't available: then always deploy.
+          current=$(git rev-parse "HEAD:services/$svc" "HEAD:shared" 2>/dev/null | sha1sum | cut -c1-40 || echo "")
+          [ -d .git ] || current=""
+          live=$(gcloud run services describe "shop-$svc" --region=asia-southeast1 \
+                   --format='value(metadata.labels.source-tree-hash)' 2>/dev/null || echo "")
+          if [ -z "$current" ] || [ "$current" != "$live" ]; then
+            echo "$svc ${current:-unknown}" >> /workspace/deploy.txt
+            echo "shop-$svc: changed -> deploy"
+          else
+            echo "shop-$svc: unchanged -> skip"
+          fi
+        done
+
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        while read -r svc hash; do
+          image="asia-southeast1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/shop-$svc:$COMMIT_SHA"
+          docker build -q -f "services/$svc/Dockerfile" -t "$image" .
+          docker push -q "$image"
+        done < /workspace/deploy.txt
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        region=asia-southeast1
+        common="GOOGLE_CLOUD_PROJECT=$PROJECT_ID,OTEL_TRACES_EXPORTER=gcp,PUBSUB_ENDPOINT=https://pubsub.googleapis.com,PUBSUB_PROJECT=$PROJECT_ID,TOPIC_PREFIX=eoneshop.,RELAY_INLINE=on"
+        url() { gcloud run services describe "shop-$1" --region=$region --format='value(status.url)'; }
+
+        # Gateway last: it needs the others' URLs.
+        for svc in catalog order payment notification gateway; do
+          line=$(grep "^$svc " /workspace/deploy.txt || true)
+          [ -n "$line" ] || continue
+          hash=${line#* }
+          upper=$(echo "$svc" | tr a-z A-Z)
+          case "$svc" in
+            gateway)
+              extra=(--allow-unauthenticated
+                     "--set-env-vars=$common,CHAOS_ENABLED=off,CATALOG_URL=$(url catalog),ORDER_URL=$(url order),PAYMENT_URL=$(url payment),NOTIFICATION_URL=$(url notification)") ;;
+            order)
+              extra=(--no-allow-unauthenticated
+                     "--set-env-vars=$common,LAZY_SWEEP=on,ORDER_TIMEOUT_S=30"
+                     "--set-secrets=DATABASE_URL=EONESHOP_ORDER_DATABASE_URL:latest") ;;
+            *)
+              # Private: only the gateway and Pub/Sub push may call them (IAM).
+              extra=(--no-allow-unauthenticated
+                     "--set-env-vars=$common"
+                     "--set-secrets=DATABASE_URL=EONESHOP_${upper}_DATABASE_URL:latest") ;;
+          esac
+          gcloud run deploy "shop-$svc" \
+            --image="asia-southeast1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/shop-$svc:$COMMIT_SHA" \
+            --region=$region \
+            --service-account="shop-$svc-run@$PROJECT_ID.iam.gserviceaccount.com" \
+            --min-instances=0 --max-instances=2 --memory=512Mi --cpu=1 \
+            --update-labels="source-tree-hash=$hash,commit-sha=$COMMIT_SHA,app=eoneshop" \
+            "${extra[@]}" --quiet
+        done
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+timeout: 1800s

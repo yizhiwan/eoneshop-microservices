@@ -47,6 +47,10 @@ class Order(Base):
 
 
 ORDER_TIMEOUT_S = float(os.getenv("ORDER_TIMEOUT_S", "15"))
+# Production (ADR 0006): no background CPU on Cloud Run and no scheduler (it
+# would keep Neon awake 24/7), so overdue orders are swept whenever someone
+# places or looks at an order. A timeout only matters when someone is looking.
+LAZY_SWEEP = os.getenv("LAZY_SWEEP", "off") == "on"
 
 bus = EventBus(Base, SessionLocal, source="order")
 chaos = Chaos()
@@ -67,7 +71,9 @@ def sweep_once(now: datetime | None = None) -> int:
                 _finish(db, order.ref, "CANCELLED", "timeout")
                 telemetry.log("order timed out", severity="WARNING", order_ref=order.ref)
         db.commit()
-        return len(stuck)
+    if stuck:
+        bus.relay_after_commit()
+    return len(stuck)
 
 
 def start_sweeper(interval: float = 1.0) -> None:
@@ -112,6 +118,15 @@ def _by_ref(db: Session, ref: str) -> Order | None:
     return db.scalar(select(Order).where(Order.ref == ref))
 
 
+@app.post("/internal/tick")
+def tick():
+    """Sweep timed-out orders and flush the outbox on demand. Nothing calls it
+    on a schedule (ADR 0006); it's for operators and for tests."""
+    swept = sweep_once()
+    published = bus.relay_once()
+    return {"swept": swept, "published": published}
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -120,6 +135,8 @@ def health():
 @app.post("/orders", status_code=202)
 def place_order(body: OrderIn, response: Response, db: Session = Depends(get_db),
                 idempotency_key: str | None = Header(None, max_length=64)):
+    if LAZY_SWEEP:
+        sweep_once()
     # A client retrying with the same Idempotency-Key gets the same order back
     # instead of a second one.
     if idempotency_key and (existing := _by_ref(db, idempotency_key)):
@@ -138,11 +155,14 @@ def place_order(body: OrderIn, response: Response, db: Session = Depends(get_db)
         db.rollback()
         response.status_code = 200
         return _out(_by_ref(db, ref))
+    bus.relay_after_commit()
     return _out(order)
 
 
 @app.get("/orders/{order_id}")
 def get_order(order_id: int, db: Session = Depends(get_db)):
+    if LAZY_SWEEP:
+        sweep_once()
     order = db.get(Order, order_id)
     if order is None:
         raise HTTPException(404, "Order not found")

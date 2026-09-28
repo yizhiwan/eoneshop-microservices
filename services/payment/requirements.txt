@@ -7,3 +7,5 @@ opentelemetry-sdk==1.45.*
 opentelemetry-exporter-otlp-proto-http==1.45.*
 opentelemetry-instrumentation-fastapi==0.66b0
 opentelemetry-instrumentation-httpx==0.66b0
+psycopg[binary]==3.3.*
+opentelemetry-exporter-gcp-trace==1.15.*
