@@ -34,7 +34,7 @@ def test_place_order_is_pending_and_emits_event(client, published):
     r = place(client)
     assert r.status_code == 202 and r.json()["status"] == "PENDING"
     ref = r.json()["ref"]
-    assert published() == [("order.created", {"order_ref": ref, "product_id": 1, "qty": 2})]
+    assert published() == [("order.created", {"order_ref": ref, "product_id": 1, "qty": 2, "scenario": "normal"})]
 
 
 def test_idempotency_key_returns_same_order(client, published):
@@ -158,3 +158,10 @@ def test_flush_per_request_exports_the_server_span_before_responding():
     telemetry.flush_per_request(mini)
     assert TestClient(mini).get("/ping").json() == {"ok": True}
     assert "GET /ping" in [s.name for s in spans.get_finished_spans()]
+
+
+def test_scenario_travels_in_order_created(client, published):
+    r = client.post("/orders", json={"product_id": 1, "qty": 1, "scenario": "slow_payment"})
+    assert r.status_code == 202
+    assert published()[0][1]["scenario"] == "slow_payment"
+    assert client.post("/orders", json={"product_id": 1, "qty": 1, "scenario": "rm -rf"}).status_code == 422

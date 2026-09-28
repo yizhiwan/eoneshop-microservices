@@ -13,20 +13,25 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PORTS = {"gateway": 8080, "catalog": 8001, "order": 8002, "payment": 8003,
-         "notification": 8004, "broker": 8085, "traces": 8086}
+         "notification": 8004, "broker": 8085, "traces": 8086, "feed": 8087}
 URL = {name: f"http://127.0.0.1:{port}" for name, port in PORTS.items()}
 PUSH = "/pubsub/push"
 SUBSCRIPTIONS = ",".join([
-    f"order.created={URL['catalog']}{PUSH}",
-    f"stock.reserved={URL['payment']}{PUSH}",
-    f"stock.rejected={URL['order']}{PUSH}",
-    f"payment.succeeded={URL['order']}{PUSH}",
-    f"payment.failed={URL['order']}{PUSH}",
-    f"order.completed={URL['notification']}{PUSH}",
-    f"order.cancelled={URL['notification']}{PUSH}",
+    f"order.created={URL['catalog']}{PUSH}#catalog",
+    f"stock.reserved={URL['payment']}{PUSH}#payment",
+    f"stock.rejected={URL['order']}{PUSH}#order",
+    f"payment.succeeded={URL['order']}{PUSH}#order",
+    f"payment.failed={URL['order']}{PUSH}#order",
+    f"order.completed={URL['notification']}{PUSH}#notification",
+    f"order.cancelled={URL['notification']}{PUSH}#notification",
     # saga compensation (ADR 0004)
-    f"order.cancelled={URL['catalog']}{PUSH}",
-    f"order.cancelled={URL['payment']}{PUSH}",
+    f"order.cancelled={URL['catalog']}{PUSH}#catalog",
+    f"order.cancelled={URL['payment']}{PUSH}#payment",
+] + [
+    # the visualizer's read-only tap on every topic (ADR 0007)
+    f"{topic}={URL['feed']}{PUSH}#feed" for topic in (
+        "order.created", "stock.reserved", "stock.rejected", "stock.released", "payment.succeeded",
+        "payment.failed", "payment.refunded", "order.completed", "order.cancelled")
 ])
 
 
@@ -37,13 +42,15 @@ def main() -> None:
            "DUPLICATE_RATE": "1" if "--dupes" in sys.argv else "0",
            # Tracing (ADR 0005): export to the local collector, flush quickly.
            "TRACES_URL": URL["traces"], "OTEL_EXPORTER_OTLP_ENDPOINT": URL["traces"],
-           "OTEL_BSP_SCHEDULE_DELAY": "500"}
+           "OTEL_BSP_SCHEDULE_DELAY": "500",
+           # Visualizer (ADR 0007): feed route, and never let the demo sell out.
+           "FEED_URL": URL["feed"], "RESTOCK_BELOW": "2", "DEAD_LETTER_URL": URL["feed"] + PUSH}
     procs = [
         subprocess.Popen([sys.executable, "-m", "uvicorn", "app.main:app", "--port", str(port),
                           "--log-level", "warning"], cwd=ROOT / "services" / name, env=env)
         for name, port in PORTS.items()
     ]
-    print(f"EoneShop running: {URL['gateway']}  (events: /api/events, traces: /api/traces)")
+    print(f"EoneShop running: {URL['gateway']}  (visualizer: /, events: /api/events, traces: /api/traces)")
     try:
         while all(p.poll() is None for p in procs):
             time.sleep(0.5)

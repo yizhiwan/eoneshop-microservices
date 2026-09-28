@@ -15,7 +15,7 @@ PROJECT=eonelabs-portfolio
 REGION=asia-southeast1
 P="--project=$PROJECT"
 PREFIX=eoneshop.
-SERVICES=(gateway catalog order payment notification)
+SERVICES=(gateway catalog order payment notification feed)
 DB_SERVICES=(catalog order payment notification)
 
 sa() { echo "shop-$1-run@$PROJECT.iam.gserviceaccount.com"; }
@@ -45,6 +45,9 @@ SUBSCRIPTIONS=(
   "order.cancelled catalog"
   "order.cancelled payment"
 )
+# The visualizer's read-only tap (ADR 0007): every topic, plus dead letters.
+TAP_TOPICS=(order.created stock.reserved stock.rejected stock.released payment.succeeded
+            payment.failed payment.refunded order.completed order.cancelled dead-letter)
 
 base() {
   gcloud services enable pubsub.googleapis.com cloudtrace.googleapis.com $P
@@ -97,11 +100,11 @@ wire() {
   gcloud pubsub topics add-iam-policy-binding "${PREFIX}dead-letter" \
     --member="serviceAccount:$pubsub_agent" --role=roles/pubsub.publisher $P >/dev/null
 
-  for s in catalog order payment notification; do
+  for s in catalog order payment notification feed; do
     invoker "$s" "serviceAccount:$PUSH_SA"
   done
   # The gateway calls these directly (ID token audience = service URL).
-  for s in catalog order notification; do
+  for s in catalog order notification feed; do
     invoker "$s" "serviceAccount:$(sa gateway)"
   done
 
@@ -115,6 +118,14 @@ wire() {
       --dead-letter-topic="${PREFIX}dead-letter" --max-delivery-attempts=5 $P
     gcloud pubsub subscriptions add-iam-policy-binding "$name" \
       --member="serviceAccount:$pubsub_agent" --role=roles/pubsub.subscriber $P >/dev/null
+  done
+  # Tap subscriptions: no dead-lettering (a tap failure isn't an order
+  # failure) and short retention, so a sleeping feed never builds a backlog.
+  for topic in "${TAP_TOPICS[@]}"; do
+    ok gcloud pubsub subscriptions create "$PREFIX$topic--feed" --topic="$PREFIX$topic" \
+      --push-endpoint="$(url feed)/pubsub/push" \
+      --push-auth-service-account="$PUSH_SA" \
+      --ack-deadline=10 --message-retention-duration=10m $P
   done
   echo "wire: done"
 }

@@ -4,9 +4,10 @@ Reacts to order.created by reserving stock, then announces stock.reserved or
 stock.rejected. Saga compensation: on order.cancelled it releases the
 reservation and announces stock.released.
 """
+import os
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from sqlalchemy import Integer, String
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
@@ -26,6 +27,9 @@ class Product(Base):
 
 
 SEED = [("Kopi O Beans", 2500, 20), ("Batik Mug", 3500, 10), ("Keropok Box", 1500, 5)]
+# Public demo: top a product back up to its seed level when it runs low, so
+# visitors never find the shop sold out. Off by default (tests, local).
+RESTOCK_BELOW = int(os.getenv("RESTOCK_BELOW", "0"))
 
 bus = EventBus(Base, SessionLocal, source="catalog")
 chaos = Chaos()
@@ -58,7 +62,14 @@ def health():
 
 @app.get("/products")
 def list_products(db: Session = Depends(get_db)):
-    return [_out(p) for p in db.query(Product).order_by(Product.id)]
+    products = db.query(Product).order_by(Product.id).all()
+    if RESTOCK_BELOW:
+        seed_stock = {name: stock for name, _, stock in SEED}
+        for p in products:
+            if p.stock < RESTOCK_BELOW:
+                p.stock = seed_stock.get(p.name, p.stock)
+        db.commit()
+    return [_out(p) for p in products]
 
 
 class Reservation(Base):
@@ -73,6 +84,10 @@ class Reservation(Base):
 
 
 def on_order_created(db: Session, d: dict) -> None:
+    if d.get("scenario") == "catalog_down":
+        # Visitor asked for it: fail this order's delivery every time, so
+        # Pub/Sub retries, then dead-letters it, and the order times out.
+        raise HTTPException(503, "scenario: catalog is down for this order")
     if db.get(Reservation, d["order_ref"]) is not None:
         return  # already handled, or cancelled before it got here (VOID)
     product = db.get(Product, d["product_id"])
@@ -84,7 +99,8 @@ def on_order_created(db: Session, d: dict) -> None:
     product.stock -= d["qty"]
     db.add(Reservation(order_ref=d["order_ref"], product_id=product.id, qty=d["qty"], status="RESERVED"))
     bus.add(db, "stock.reserved", {"order_ref": d["order_ref"], "product_id": product.id,
-                                   "qty": d["qty"], "amount_cents": product.price_cents * d["qty"]})
+                                   "qty": d["qty"], "amount_cents": product.price_cents * d["qty"],
+                                   "scenario": d.get("scenario", "normal")})
 
 
 def on_order_cancelled(db: Session, d: dict) -> None:

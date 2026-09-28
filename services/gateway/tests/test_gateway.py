@@ -83,3 +83,10 @@ def test_rate_limits_writes_per_ip(client, monkeypatch):
 def test_chaos_can_be_switched_off(client, monkeypatch):
     monkeypatch.setattr(main, "CHAOS_ENABLED", False)
     assert client.get("/api/chaos/payment").status_code == 404
+
+
+def test_serves_visualizer_and_routes_feed(client):
+    page = client.get("/")
+    assert page.status_code == 200 and "Watch an order travel" in page.text
+    body = client.get("/api/feed?order=r1&after=3").json()
+    assert body["path"] == "/feed" and body["query"] == "order=r1&after=3"

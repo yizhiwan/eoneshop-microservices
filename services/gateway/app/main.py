@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request, Response
+from fastapi.responses import FileResponse
 
 from shared import gcp, telemetry
 
@@ -27,6 +28,8 @@ ROUTES = {
     "notifications": NOTIFICATION_URL,
     # Broker delivery log, read by the Phase 7 visualizer.
     "events": os.getenv("BROKER_URL", "http://127.0.0.1:8085"),
+    # Read-only tap on every topic, for the visualizer (ADR 0007).
+    "feed": os.getenv("FEED_URL", "http://127.0.0.1:8087"),
     # Local trace collector (ADR 0005).
     "traces": os.getenv("TRACES_URL", "http://127.0.0.1:8086"),
 }
@@ -62,9 +65,18 @@ app = FastAPI(title="gateway", lifespan=lifespan)
 telemetry.setup("gateway", app)
 
 
+STATIC = os.path.join(os.path.dirname(__file__), "static")
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/", include_in_schema=False)
+def visualizer():
+    """The live order visualizer (ADR 0007)."""
+    return FileResponse(os.path.join(STATIC, "index.html"))
 
 
 def _client_ip(request: Request) -> str:

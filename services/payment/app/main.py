@@ -6,6 +6,7 @@ twice even if the same request arrives as two different events. Saga
 compensation: on order.cancelled it refunds an approved charge.
 """
 import os
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
@@ -20,6 +21,9 @@ from .db import Base, SessionLocal, engine, get_db
 
 # Demo "chaos" switch: amounts at or above this are declined.
 FAIL_AT_CENTS = int(os.getenv("PAYMENT_FAIL_AT_CENTS", "10000"))
+# "slow_payment" scenario: longer than the order timeout, so the order is
+# cancelled while we're still thinking and the saga has to clean up.
+SLOW_PAYMENT_S = float(os.getenv("SLOW_PAYMENT_S", "25"))
 
 
 class Charge(Base):
@@ -52,9 +56,16 @@ def health():
 
 
 def on_stock_reserved(db: Session, d: dict) -> None:
+    scenario = d.get("scenario", "normal")
+    if scenario == "slow_payment":
+        # Commit the event claim first so we don't hold a transaction (and,
+        # on SQLite, the whole database) open while we "think".
+        db.commit()
+        time.sleep(SLOW_PAYMENT_S)
     if db.get(Charge, d["order_ref"]) is not None:
         return  # already charged (or voided): never charge an order twice
-    approved = not chaos.settings["decline_all"] and d["amount_cents"] < FAIL_AT_CENTS
+    approved = (not chaos.settings["decline_all"] and scenario != "decline_payment"
+                and d["amount_cents"] < FAIL_AT_CENTS)
     db.add(Charge(order_ref=d["order_ref"], amount_cents=d["amount_cents"],
                   status="APPROVED" if approved else "DECLINED"))
     bus.add(db, "payment.succeeded" if approved else "payment.failed",

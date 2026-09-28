@@ -19,7 +19,7 @@ steps:
       - |
         set -euo pipefail
         : > /workspace/deploy.txt
-        for svc in catalog order payment notification gateway; do
+        for svc in catalog order payment notification feed gateway; do
           # Empty if git history isn't available: then always deploy.
           current=$(git rev-parse "HEAD:services/$svc" "HEAD:shared" 2>/dev/null | sha1sum | cut -c1-40 || echo "")
           [ -d .git ] || current=""
@@ -58,19 +58,35 @@ steps:
         url() { gcloud run services describe "shop-$1" --region=$region --format='value(status.url)'; }
 
         # Gateway last: it needs the others' URLs.
-        for svc in catalog order payment notification gateway; do
+        for svc in catalog order payment notification feed gateway; do
           line=$(grep "^$svc " /workspace/deploy.txt || true)
           [ -n "$line" ] || continue
           hash=${line#* }
           upper=$(echo "$svc" | tr a-z A-Z)
+          max=2
           case "$svc" in
             gateway)
               extra=(--allow-unauthenticated
-                     "--set-env-vars=$common,CHAOS_ENABLED=off,CATALOG_URL=$(url catalog),ORDER_URL=$(url order),PAYMENT_URL=$(url payment),NOTIFICATION_URL=$(url notification)") ;;
+                     "--set-env-vars=$common,CHAOS_ENABLED=off,CATALOG_URL=$(url catalog),ORDER_URL=$(url order),PAYMENT_URL=$(url payment),NOTIFICATION_URL=$(url notification),FEED_URL=$(url feed)") ;;
+            feed)
+              # Visualizer tap: events live in memory, so exactly one instance.
+              max=1
+              extra=(--no-allow-unauthenticated "--set-env-vars=$common") ;;
             order)
               extra=(--no-allow-unauthenticated
-                     "--set-env-vars=$common,LAZY_SWEEP=on,ORDER_TIMEOUT_S=30"
+                     "--set-env-vars=$common,LAZY_SWEEP=on,ORDER_TIMEOUT_S=20"
                      "--set-secrets=DATABASE_URL=EONESHOP_ORDER_DATABASE_URL:latest") ;;
+            payment)
+              # slow_payment scenario must outlast the order timeout (and stay
+              # under the 30 s Pub/Sub ack deadline).
+              extra=(--no-allow-unauthenticated
+                     "--set-env-vars=$common,SLOW_PAYMENT_S=28"
+                     "--set-secrets=DATABASE_URL=EONESHOP_PAYMENT_DATABASE_URL:latest") ;;
+            catalog)
+              # Public demo: never sell out.
+              extra=(--no-allow-unauthenticated
+                     "--set-env-vars=$common,RESTOCK_BELOW=3"
+                     "--set-secrets=DATABASE_URL=EONESHOP_CATALOG_DATABASE_URL:latest") ;;
             *)
               # Private: only the gateway and Pub/Sub push may call them (IAM).
               extra=(--no-allow-unauthenticated
@@ -81,7 +97,7 @@ steps:
             --image="asia-southeast1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/shop-$svc:$COMMIT_SHA" \
             --region=$region \
             --service-account="shop-$svc-run@$PROJECT_ID.iam.gserviceaccount.com" \
-            --min-instances=0 --max-instances=2 --memory=512Mi --cpu=1 \
+            --min-instances=0 --max-instances=$max --memory=512Mi --cpu=1 \
             --update-labels="source-tree-hash=$hash,commit-sha=$COMMIT_SHA,app=eoneshop" \
             "${extra[@]}" --quiet
         done

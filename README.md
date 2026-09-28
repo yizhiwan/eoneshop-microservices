@@ -1,7 +1,11 @@
 # EoneShop — learning microservices in public
 
 A mini e-commerce shop built step by step, from a monolith to event-driven
-microservices on Cloud Run. Live demo (coming): https://micro.eonelabs.my
+microservices on Cloud Run, Google Pub/Sub and Neon Postgres.
+
+**Live: https://micro.eonelabs.my**: place an order and watch it travel through
+the services. Break it on purpose (declined card, slow payment, catalog down)
+and watch the saga clean up. Failures only ever affect your own order.
 
 | Phase | Topic | Status |
 |---|---|---|
@@ -10,8 +14,8 @@ microservices on Cloud Run. Live demo (coming): https://micro.eonelabs.my
 | 3 | Async events (Pub/Sub), idempotency, outbox | ✅ |
 | 4 | Saga + compensation, chaos toggle | ✅ |
 | 5 | Observability (OpenTelemetry, Cloud Trace) | ✅ |
-| 6 | Deploy to Cloud Run (Pub/Sub, Neon, Cloud Trace) | 🚧 code ready, [setup](docs/deploy.md) pending |
-| 7 | Live event-flow visualizer | |
+| 6 | Deploy to Cloud Run (Pub/Sub, Neon, Cloud Trace) | ✅ [runbook](docs/deploy.md) |
+| 7 | Live event-flow visualizer | ✅ |
 
 ## Run the monolith locally
 
@@ -28,7 +32,7 @@ Orders totalling RM100+ fail payment on purpose and roll back stock.
 ## Run the services
 
 ```bash
-python scripts/dev.py            # all 7 services, no Docker; gateway on http://127.0.0.1:8080
+python scripts/dev.py            # all 8 services, no Docker; gateway on http://127.0.0.1:8080
 python scripts/dev.py --dupes    # broker delivers every message twice
 docker compose up --build        # same thing in containers
 ```
