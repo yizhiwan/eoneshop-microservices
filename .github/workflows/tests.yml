@@ -1,9 +1,12 @@
 name: tests
 on: [push, pull_request]
 jobs:
-  monolith:
+  test:
     runs-on: ubuntu-latest
-    defaults: { run: { working-directory: monolith } }
+    strategy:
+      matrix:
+        dir: [monolith, services/gateway, services/catalog, services/order, services/payment]
+    defaults: { run: { working-directory: "${{ matrix.dir }}" } }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

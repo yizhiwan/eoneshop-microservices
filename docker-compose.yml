@@ -1,0 +1,20 @@
+# Phase 2: four services, each with its own SQLite file (DB per service).
+# Only the gateway is published to the host; the rest talk on the compose network.
+services:
+  gateway:
+    build: services/gateway
+    ports: ["8080:8080"]
+    environment:
+      CATALOG_URL: http://catalog:8080
+      ORDER_URL: http://order:8080
+    depends_on: [catalog, order]
+  catalog:
+    build: services/catalog
+  order:
+    build: services/order
+    environment:
+      CATALOG_URL: http://catalog:8080
+      PAYMENT_URL: http://payment:8080
+    depends_on: [catalog, payment]
+  payment:
+    build: services/payment
