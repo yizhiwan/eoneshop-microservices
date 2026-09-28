@@ -1,0 +1,8 @@
+fastapi==0.115.*
+uvicorn[standard]==0.32.*
+httpx==0.27.*
+pytest==8.*
+opentelemetry-proto==1.45.*
+# tests only: build real OTLP payloads
+opentelemetry-sdk==1.45.*
+opentelemetry-exporter-otlp-proto-common==1.45.*

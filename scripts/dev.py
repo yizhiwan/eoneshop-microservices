@@ -13,7 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PORTS = {"gateway": 8080, "catalog": 8001, "order": 8002, "payment": 8003,
-         "notification": 8004, "broker": 8085}
+         "notification": 8004, "broker": 8085, "traces": 8086}
 URL = {name: f"http://127.0.0.1:{port}" for name, port in PORTS.items()}
 PUSH = "/pubsub/push"
 SUBSCRIPTIONS = ",".join([
@@ -34,13 +34,16 @@ def main() -> None:
     env = {**os.environ, "PYTHONPATH": str(ROOT), "PYTHONUNBUFFERED": "1", "BROKER_URL": URL["broker"],
            "CATALOG_URL": URL["catalog"], "ORDER_URL": URL["order"], "PAYMENT_URL": URL["payment"],
            "NOTIFICATION_URL": URL["notification"], "SUBSCRIPTIONS": SUBSCRIPTIONS,
-           "DUPLICATE_RATE": "1" if "--dupes" in sys.argv else "0"}
+           "DUPLICATE_RATE": "1" if "--dupes" in sys.argv else "0",
+           # Tracing (ADR 0005): export to the local collector, flush quickly.
+           "TRACES_URL": URL["traces"], "OTEL_EXPORTER_OTLP_ENDPOINT": URL["traces"],
+           "OTEL_BSP_SCHEDULE_DELAY": "500"}
     procs = [
         subprocess.Popen([sys.executable, "-m", "uvicorn", "app.main:app", "--port", str(port),
                           "--log-level", "warning"], cwd=ROOT / "services" / name, env=env)
         for name, port in PORTS.items()
     ]
-    print(f"EoneShop running: {URL['gateway']}  (broker log: {URL['gateway']}/api/events)")
+    print(f"EoneShop running: {URL['gateway']}  (events: /api/events, traces: /api/traces)")
     try:
         while all(p.poll() is None for p in procs):
             time.sleep(0.5)

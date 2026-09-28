@@ -25,3 +25,29 @@ def test_duplicate_event_sends_one_email(client):
     client.post("/pubsub/push", json=push)
     client.post("/pubsub/push", json=push)
     assert len(client.get("/notifications").json()) == 1
+
+
+def test_concurrent_duplicates_send_one_email(client):
+    """Two copies of one event arriving at the same moment: the loser must
+    fail on the processed_events claim BEFORE the handler runs, or the
+    customer gets two emails even though the database rolled one back."""
+    import threading
+
+    from app.main import OUTBOX_OF_THE_WORLD
+
+    OUTBOX_OF_THE_WORLD.clear()
+    push = make_push("order.completed", {"order_ref": "race", "status": "COMPLETED", "reason": None},
+                     event_id="race-1")
+    start = threading.Barrier(4)
+
+    def deliver():
+        start.wait()
+        assert client.post("/pubsub/push", json=push).status_code == 204
+
+    threads = [threading.Thread(target=deliver) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert OUTBOX_OF_THE_WORLD == ["race"]
+    assert len(client.get("/notifications").json()) == 1

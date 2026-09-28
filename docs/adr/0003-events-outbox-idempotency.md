@@ -48,6 +48,8 @@ POST /orders -> order-svc: PENDING + order.created           (202, returns at on
   (about 2.5 s per order; my first measurement said "under 1 s" but that timer
   was broken, and ADR 0004 found the rest). This was also most of the 9 s in ADR 0002.
 - Duplicate delivery on: 22 deliveries, 3 emails (not 6), 0 errors.
+  *Correction (ADR 0005): that counted email **rows**. Side effects outside the
+  database could still run twice in a race; fixed by claiming the event first.*
 
 ## Consequences / known gap
 - The client gets `PENDING` and has to poll (or later, subscribe).

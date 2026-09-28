@@ -82,3 +82,33 @@ def test_sweeper_cancels_stuck_orders(client, published):
     # the payment that finally arrives must not revive it (payment refunds instead)
     client.post("/pubsub/push", json=make_push("payment.succeeded", {"order_ref": o["ref"], "amount_cents": 5000}))
     assert client.get(f"/orders/{o['id']}").json()["status"] == "CANCELLED"
+
+
+def test_trace_follows_the_order_through_outbox_and_events(client):
+    """One trace id from the HTTP request, through the outbox, to the consumer."""
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from shared import telemetry
+
+    spans = InMemorySpanExporter()
+    telemetry.add_span_processor(SimpleSpanProcessor(spans))
+    trace_id = "ab" * 16
+    traceparent = f"00-{trace_id}-{'cd' * 8}-01"
+
+    o = place(client, traceparent=traceparent).json()
+    bus.sender = lambda topic, body: None
+    bus.relay_once()
+
+    # payment answers in the same trace; order consumes it and emits order.completed
+    client.post("/pubsub/push", json=make_push("payment.succeeded", {"order_ref": o["ref"], "amount_cents": 5000},
+                                               trace={"traceparent": traceparent}))
+    bus.relay_once()
+
+    got = {s.name: format(s.context.trace_id, "032x") for s in spans.get_finished_spans()}
+    assert got["POST /orders"] == trace_id
+    assert got["publish order.created"] == trace_id
+    assert got["process payment.succeeded"] == trace_id
+    assert got["publish order.completed"] == trace_id
+    process = next(s for s in spans.get_finished_spans() if s.name == "process payment.succeeded")
+    assert process.attributes["order.ref"] == o["ref"]
