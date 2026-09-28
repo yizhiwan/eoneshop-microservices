@@ -45,12 +45,12 @@ base() {
   gcloud services enable pubsub.googleapis.com cloudtrace.googleapis.com $P
 
   for s in "${SERVICES[@]}"; do
-    ok gcloud iam service-accounts create "shop-$s-run" --display-name="EoneShop $s (Cloud Run)" $P
+    ok gcloud iam service-accounts create "shop-$s-run" --display-name="eoneshop-$s-cloud-run" $P
     # Everyone writes traces; logs need no grant on Cloud Run.
     gcloud projects add-iam-policy-binding $PROJECT --member="serviceAccount:$(sa $s)" \
       --role=roles/cloudtrace.agent --condition=None --quiet >/dev/null
   done
-  ok gcloud iam service-accounts create shop-pubsub-push --display-name="EoneShop Pub/Sub push identity" $P
+  ok gcloud iam service-accounts create shop-pubsub-push --display-name="eoneshop-pubsub-push-identity" $P
 
   for t in order.created order.completed order.cancelled stock.reserved stock.rejected stock.released \
            payment.succeeded payment.failed payment.refunded dead-letter; do
