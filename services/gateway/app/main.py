@@ -6,6 +6,7 @@ with an ID token on each call (ADR 0006). It also rate-limits writes, because
 it's a public demo.
 """
 import asyncio
+import html
 import os
 import time
 import uuid
@@ -13,7 +14,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 
 from shared import gcp, telemetry
 
@@ -102,6 +103,25 @@ telemetry.setup("gateway", app)
 
 
 STATIC = os.path.join(os.path.dirname(__file__), "static")
+# Same GA4 property as eonelabs.my and its other subdomains, so the demo shows
+# up next to the rest of the site. A public ID, not a secret; unset = no GA.
+GA_MEASUREMENT_ID = os.getenv("GA_MEASUREMENT_ID", "")
+
+
+def _ga_snippet() -> str:
+    """Standard gtag.js loader (same shape as eonelabs.my's), or ""."""
+    if not GA_MEASUREMENT_ID:
+        return ""
+    ga_id = html.escape(GA_MEASUREMENT_ID, quote=True)
+    return (
+        f'<script async src="https://www.googletagmanager.com/gtag/js?id={ga_id}"></script>\n'
+        "<script>\n"
+        "  window.dataLayer = window.dataLayer || [];\n"
+        "  function gtag(){dataLayer.push(arguments);}\n"
+        "  gtag('js', new Date());\n"
+        f"  gtag('config', '{ga_id}');\n"
+        "</script>\n"
+    )
 
 
 @app.get("/health")
@@ -111,8 +131,10 @@ def health():
 
 @app.get("/", include_in_schema=False)
 def visualizer():
-    """The live order visualizer (ADR 0007)."""
-    return FileResponse(os.path.join(STATIC, "index.html"))
+    """The live order visualizer (ADR 0007), with GA4 when configured."""
+    with open(os.path.join(STATIC, "index.html"), encoding="utf-8") as f:
+        page = f.read()
+    return HTMLResponse(page.replace("</head>", _ga_snippet() + "</head>", 1))
 
 
 def _client_ip(request: Request) -> str:

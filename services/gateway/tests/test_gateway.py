@@ -124,3 +124,12 @@ def test_token_bucket_refills_and_forgets_idle_clients():
     limiter.allow("b", now=100.0)
     limiter.allow("c", now=100.0)  # third key, "a" has been idle for 99 s
     assert "a" not in limiter.buckets
+
+
+def test_page_has_ga4_only_when_configured(client, monkeypatch):
+    monkeypatch.setattr(main, "GA_MEASUREMENT_ID", "")
+    assert "googletagmanager" not in client.get("/").text
+    monkeypatch.setattr(main, "GA_MEASUREMENT_ID", "G-TEST123")
+    page = client.get("/").text
+    assert "gtag/js?id=G-TEST123" in page and "gtag('config', 'G-TEST123')" in page
+    assert page.index("googletagmanager") < page.index("</head>")
