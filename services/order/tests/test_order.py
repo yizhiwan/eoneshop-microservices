@@ -194,3 +194,8 @@ def test_concurrent_sweeps_cancel_once(client, monkeypatch):
         t.join()
     bus.relay_once()
     assert sent.count("order.cancelled") == 1
+
+
+def test_order_reports_its_timeout(client):
+    from app.main import ORDER_TIMEOUT_S
+    assert place(client).json()["timeout_s"] == ORDER_TIMEOUT_S

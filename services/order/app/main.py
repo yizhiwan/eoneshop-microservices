@@ -121,7 +121,9 @@ def _out(o: Order) -> dict:
     return {"id": o.id, "ref": o.ref, "product_id": o.product_id, "qty": o.qty,
             "total_cents": o.total_cents, "status": o.status, "reason": o.reason,
             # SQLite returns naive datetimes; they are UTC.
-            "created_at": o.created_at.replace(tzinfo=timezone.utc).isoformat() if o.created_at else None}
+            "created_at": o.created_at.replace(tzinfo=timezone.utc).isoformat() if o.created_at else None,
+            # Lets the visualizer show "times out in N s" with the real setting.
+            "timeout_s": ORDER_TIMEOUT_S}
 
 
 def _by_ref(db: Session, ref: str) -> Order | None:

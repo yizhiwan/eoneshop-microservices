@@ -64,7 +64,30 @@
   ol#timeline .note { color: var(--muted); }
   .hint { color: var(--muted); font-size: .85rem; margin: 8px 0 0; }
   footer { color: var(--muted); font-size: .85rem; padding-top: 20px; padding-bottom: 32px; }
-  @media (prefers-reduced-motion: reduce) { .dot, .dotlabel { display: none; } }
+  /* "Still working" indicators: nothing on the page may look frozen while
+     the system is busy (a slow payment or a failing catalog takes ~20 s). */
+  .live-status { display: flex; align-items: center; gap: 8px; margin: 10px 0 2px; min-height: 1.5em;
+    font-size: .9rem; color: var(--ink); }
+  .live-status .muted { color: var(--muted); }
+  .pulse { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--accent);
+    animation: pulse 1.1s ease-in-out infinite; }
+  .pulse.warn { background: var(--warn); } .pulse.bad { background: var(--bad); }
+  .pulse.done { background: var(--ok); animation: none; }
+  @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .25; transform: scale(.65); } }
+  .node.waiting rect { stroke: var(--warn); stroke-width: 2.5; stroke-dasharray: 6 4;
+    animation: march 0.9s linear infinite; }
+  @keyframes march { to { stroke-dashoffset: -20; } }
+  .hub.busy circle { animation: hubpulse 1.3s ease-in-out infinite; }
+  @keyframes hubpulse { 0%, 100% { stroke-opacity: 1; } 50% { stroke-opacity: .25; } }
+  @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+  @media (prefers-reduced-motion: reduce) {
+    /* No movement, but keep a slow fade so "still working" is never invisible. */
+    .dot, .dotlabel { display: none; }
+    .pulse { animation: blink 1.6s ease-in-out infinite; }
+    .pulse.done { animation: none; }
+    .node.waiting rect { animation: none; }
+    .hub.busy circle { animation: hubpulse 1.6s ease-in-out infinite; }
+  }
 </style>
 </head>
 <body>
@@ -102,11 +125,12 @@
   <section class="panel" id="live" aria-label="Live view">
     <svg viewBox="0 0 640 330" role="img" aria-label="Diagram of the five services around Pub/Sub">
       <g id="wires"></g>
-      <g class="hub"><circle cx="360" cy="165" r="46"></circle><text x="360" y="162">Pub/Sub</text>
+      <g class="hub" id="hub"><circle cx="360" cy="165" r="46"></circle><text x="360" y="162">Pub/Sub</text>
         <text x="360" y="178" style="font-weight:400;font-size:11px">topics</text></g>
       <g id="nodes"></g>
       <g id="dots"></g>
     </svg>
+    <div class="live-status" id="live-status" aria-live="polite"></div>
     <ol id="timeline" aria-label="Event timeline"></ol>
   </section>
 </main>
@@ -126,6 +150,8 @@ const NODES = {
 };
 const HUB = { x: 360, y: 165 };
 const FINAL = new Set(["COMPLETED", "CANCELLED"]);
+// Keep listening this long after an order settles: clean-up is still flowing.
+const QUIET_MS = 12_000;
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const svgNS = "http://www.w3.org/2000/svg";
 const $ = (id) => document.getElementById(id);
@@ -221,6 +247,77 @@ async function loadProducts() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// What the system is waiting for, given the last event we saw. The node named
+// here blinks, so it's always clear who is expected to act next.
+const NEXT = {
+  "order.created":     ["catalog", "Waiting for catalog to reserve the stock"],
+  "stock.reserved":    ["payment", "Waiting for payment to charge the card"],
+  "stock.rejected":    ["order", "Waiting for order to cancel it"],
+  "payment.succeeded": ["order", "Waiting for order to confirm it"],
+  "payment.failed":    ["order", "Waiting for order to cancel it"],
+  "order.completed":   ["notification", "Sending the confirmation email"],
+  "order.cancelled":   ["catalog", "Cleaning up: stock back, refund, email"],
+  "stock.released":    [null, "Stock is back on the shelf. Wrapping up"],
+  "payment.refunded":  [null, "Card refunded. Wrapping up"],
+};
+
+const watch = { node: null, text: "", tone: "", t0: 0, timeoutS: 0, pending: false, timer: 0, quietUntil: 0 };
+
+function expect(node, text, tone = "") {
+  document.querySelectorAll(".node.waiting").forEach((n) => n.classList.remove("waiting"));
+  if (node) $("node-" + node)?.classList.add("waiting");
+  Object.assign(watch, { node, text, tone });
+  renderWatch();
+}
+
+function renderWatch() {
+  const secs = (performance.now() - watch.t0) / 1000;
+  let extra = "";
+  if (watch.pending && watch.timeoutS) {
+    const left = Math.ceil(watch.timeoutS - secs);
+    extra = left > 0 ? ` · times out in ${left}s` : " · timing out now";
+  } else if (watch.quietUntil) {
+    // After the order settles we keep listening for clean-up for a while.
+    extra = ` · stops listening in ${Math.max(0, Math.ceil((watch.quietUntil - performance.now()) / 1000))}s`;
+  }
+  $("live-status").innerHTML = `<span class="pulse ${watch.tone}"></span>` +
+    `<span></span><span class="muted">${secs.toFixed(1)}s${extra}</span>`;
+  $("live-status").children[1].textContent = watch.text;
+}
+
+function startWatch(timeoutS) {
+  Object.assign(watch, { t0: performance.now(), timeoutS, pending: true, quietUntil: 0 });
+  $("hub").classList.add("busy");
+  clearInterval(watch.timer);
+  watch.timer = setInterval(renderWatch, 100);
+}
+
+function stopWatch(text) {
+  clearInterval(watch.timer);
+  $("hub").classList.remove("busy");
+  document.querySelectorAll(".node.waiting").forEach((n) => n.classList.remove("waiting"));
+  $("live-status").innerHTML = `<span class="pulse done"></span><span></span>`;
+  $("live-status").children[1].textContent = text;
+}
+
+// Pick the next thing to wait for after an event, with the scenario's twist.
+function waitAfter(ev, scenario) {
+  if (ev.dead_letter) {
+    return expect(null, `Pub/Sub gave up on ${ev.failed_at} after ${ev.attempts} tries. Waiting for the order timeout`, "bad");
+  }
+  if (scenario === "slow_payment" && ev.type === "stock.reserved") {
+    return expect("payment", "Payment is taking its time (on purpose)", "warn");
+  }
+  const [node, text] = NEXT[ev.type] || [null, "Listening for more events"];
+  expect(node, text);
+  if (ev.type === "order.completed" || ev.type === "order.cancelled") {
+    // The email, or a clean-up with nothing to undo, publishes nothing back:
+    // if nothing else arrives, stop pointing at a service.
+    const waitingOn = watch.text;
+    setTimeout(() => { if (watch.text === waitingOn) expect(null, "Wrapping up, listening for late events"); }, 2500);
+  }
+}
+
 async function placeOrder() {
   $("go").disabled = true;
   $("timeline").innerHTML = "";
@@ -245,6 +342,8 @@ async function placeOrder() {
   addLine(`order ${order.id} saved as PENDING, answered 202 in ${((performance.now() - t0) / 1000).toFixed(1)}s`, "note");
   if (scenario === "catalog_down") addLine("catalog will fail every delivery; Pub/Sub retries with backoff…", "note");
   if (scenario === "slow_payment") addLine("payment will take longer than the order timeout…", "note");
+  startWatch(order.timeout_s || 0);
+  expect("order", "Order saved, announcing it to the other services");
 
   let after = 0, status = "PENDING", settledAt = 0;
   // The feed hears events through one more Pub/Sub hop than the order status,
@@ -271,12 +370,19 @@ async function placeOrder() {
       const at = serverT0 && !ev.dead_letter ? (Date.parse(ev.occurred_at) - serverT0) / 1000 : null;
       addLine(describe(ev), ev.dead_letter ? "dead" : "", at);
       animateEvent(ev);
+      waitAfter(ev, scenario);
+      if (ev.type === "order.created" && !ev.dead_letter && scenario === "catalog_down") {
+        expect("catalog", "Catalog keeps failing, Pub/Sub is retrying with longer and longer waits", "bad");
+      }
       if (ev.type === "order.completed" || ev.type === "order.cancelled") { sawFinalEvent = true; flushFinal(); }
     }
     if (o.status !== status) {
       status = o.status;
       if (FINAL.has(status)) {
         settledAt = performance.now();
+        watch.pending = false;
+        watch.quietUntil = settledAt + QUIET_MS;
+        if (!sawFinalEvent) expect("order", `Order ${status.toLowerCase()}, announcing it`);
         finalLine = [`order ${status}${o.reason ? " (" + o.reason + ")" : ""}`, status === "COMPLETED" ? "" : "dead", NaN];
         if (sawFinalEvent) flushFinal();
       }
@@ -284,11 +390,12 @@ async function placeOrder() {
     $("status").innerHTML = `Order #${order.id} <span class="badge ${status}">${status}</span>`;
     // Keep listening after the order settles: compensation (stock released,
     // refunds, emails) is still flowing. Stop after 12 quiet seconds.
-    if (settledAt && performance.now() - settledAt > 12_000) break;
+    if (settledAt && performance.now() - settledAt > QUIET_MS) break;
     await sleep(600);
   }
   flushFinal();  // the feed may be down: never lose the final line
   await queue;
+  stopWatch(status === "PENDING" ? "Stopped watching (the order is still pending)" : `Done: order ${status.toLowerCase()}, all clean-up finished`);
   $("go").disabled = false;
   loadProducts();
 }
@@ -296,6 +403,7 @@ async function placeOrder() {
 drawDiagram();
 loadProducts().catch(() => { $("product").innerHTML = "<option>Shop is waking up… reload in a few seconds</option>"; });
 $("go").addEventListener("click", () => placeOrder().catch((e) => {
+  stopWatch("Stopped");
   $("status").textContent = "Something went wrong: " + e.message; $("go").disabled = false; }));
 </script>
 </body>
