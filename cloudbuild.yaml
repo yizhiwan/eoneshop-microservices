@@ -67,7 +67,7 @@ steps:
           case "$svc" in
             gateway)
               extra=(--allow-unauthenticated
-                     "--set-env-vars=$common,CHAOS_ENABLED=off,CATALOG_URL=$(url catalog),ORDER_URL=$(url order),PAYMENT_URL=$(url payment),NOTIFICATION_URL=$(url notification),FEED_URL=$(url feed)") ;;
+                     "--set-env-vars=$common,CHAOS_ENABLED=off,GA_MEASUREMENT_ID=G-RLEP9S0YYD,CATALOG_URL=$(url catalog),ORDER_URL=$(url order),PAYMENT_URL=$(url payment),NOTIFICATION_URL=$(url notification),FEED_URL=$(url feed)") ;;
             feed)
               # Visualizer tap: events live in memory, so exactly one instance.
               max=1

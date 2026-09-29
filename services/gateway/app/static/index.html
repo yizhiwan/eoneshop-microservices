@@ -247,6 +247,11 @@ async function loadProducts() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// GA4 custom events (no-op when GA isn't loaded, e.g. locally).
+function track(name, params) {
+  if (typeof window.gtag === "function") window.gtag("event", name, params);
+}
+
 // What the system is waiting for, given the last event we saw. The node named
 // here blinks, so it's always clear who is expected to act next.
 const NEXT = {
@@ -339,6 +344,7 @@ async function placeOrder() {
     return;
   }
   serverT0 = order.created_at ? Date.parse(order.created_at) : 0;
+  track("place_order", { scenario, product_id: body.product_id, qty: body.qty });
   addLine(`order ${order.id} saved as PENDING, answered 202 in ${((performance.now() - t0) / 1000).toFixed(1)}s`, "note");
   if (scenario === "catalog_down") addLine("catalog will fail every delivery; Pub/Sub retries with backoff…", "note");
   if (scenario === "slow_payment") addLine("payment will take longer than the order timeout…", "note");
@@ -348,7 +354,7 @@ async function placeOrder() {
   let after = 0, status = "PENDING", settledAt = 0;
   // The feed hears events through one more Pub/Sub hop than the order status,
   // so hold the "order COMPLETED/CANCELLED" line until its event shows up.
-  let finalLine = null, sawFinalEvent = false;
+  let finalLine = null, sawFinalEvent = false, finalReason = null;
   const flushFinal = () => { if (finalLine) { addLine(...finalLine); finalLine = null; } };
   const deadline = performance.now() + 90_000;
   while (performance.now() < deadline) {
@@ -383,6 +389,7 @@ async function placeOrder() {
         watch.pending = false;
         watch.quietUntil = settledAt + QUIET_MS;
         if (!sawFinalEvent) expect("order", `Order ${status.toLowerCase()}, announcing it`);
+        finalReason = o.reason;
         finalLine = [`order ${status}${o.reason ? " (" + o.reason + ")" : ""}`, status === "COMPLETED" ? "" : "dead", NaN];
         if (sawFinalEvent) flushFinal();
       }
@@ -394,6 +401,9 @@ async function placeOrder() {
     await sleep(600);
   }
   flushFinal();  // the feed may be down: never lose the final line
+  track("order_finished", { scenario, status: status.toLowerCase(), reason: finalReason || "none",
+                            // time until the order settled, not including the clean-up listening
+                            seconds: settledAt ? Math.round((settledAt - t0) / 1000) : null });
   await queue;
   stopWatch(status === "PENDING" ? "Stopped watching (the order is still pending)" : `Done: order ${status.toLowerCase()}, all clean-up finished`);
   $("go").disabled = false;
