@@ -105,6 +105,13 @@ def test_rate_limits_reads_per_ip_with_retry_after(client, monkeypatch):
     assert client.get("/health", headers=ip).status_code == 200
 
 
+def test_serves_its_own_favicon(client):
+    ico = client.get("/favicon.ico")
+    assert ico.status_code == 200 and ico.headers["content-type"] == "image/x-icon"
+    assert client.get("/apple-touch-icon.png").headers["content-type"] == "image/png"
+    assert 'rel="icon" href="/favicon.ico"' in client.get("/").text
+
+
 def test_default_read_budget_fits_the_visualizer(client):
     """The page polls /orders and /feed every 0.6 s: 200 GETs a minute."""
     limiter = main.RateLimiter(main.READS_PER_MINUTE)
