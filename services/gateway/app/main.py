@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 
 from shared import gcp, telemetry
 
@@ -127,6 +127,25 @@ def _ga_snippet() -> str:
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+# Icons Google and browsers fetch from this host (it picks one favicon per
+# hostname, so micro. needs its own rather than a cross-host link).
+ICONS = {
+    "/favicon.ico": ("favicon.ico", "image/x-icon"),
+    "/icon-192.png": ("icon-192.png", "image/png"),
+    "/apple-touch-icon.png": ("apple-touch-icon.png", "image/png"),
+}
+
+
+def _icon_route(path: str, filename: str, media_type: str) -> None:
+    @app.get(path, include_in_schema=False)
+    def icon():
+        return FileResponse(os.path.join(STATIC, filename), media_type=media_type)
+
+
+for _path, (_file, _type) in ICONS.items():
+    _icon_route(_path, _file, _type)
 
 
 @app.get("/", include_in_schema=False)
